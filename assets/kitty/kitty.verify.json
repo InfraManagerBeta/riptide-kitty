@@ -1,0 +1,145 @@
+{
+  "file": "assets/kitty/kitty.glb",
+  "file_size_bytes": 3719420,
+  "skin_count": 1,
+  "joint_names": [
+    "Root",
+    "Hips",
+    "Pelvis",
+    "LeftUpLeg",
+    "LeftLeg",
+    "LeftFoot",
+    "LeftToeBase",
+    "LeftLegTwist1",
+    "LeftLegTwist2",
+    "LeftUpLegTwist1",
+    "LeftUpLegTwist2",
+    "RightUpLeg",
+    "RightUpLegTwist1",
+    "RightUpLegTwist2",
+    "RightLeg",
+    "RightFoot",
+    "RightToeBase",
+    "RightLegTwist1",
+    "RightLegTwist2",
+    "Spine",
+    "Spine1",
+    "Spine2",
+    "Neck",
+    "Neck1",
+    "Head",
+    "LeftShoulder",
+    "LeftArm",
+    "LeftForeArm",
+    "LeftForeArmTwist1",
+    "LeftForeArmTwist2",
+    "LeftHand",
+    "LeftArmTwist1",
+    "LeftArmTwist2",
+    "RightShoulder",
+    "RightArm",
+    "RightArmTwist1",
+    "RightArmTwist2",
+    "RightForeArm",
+    "RightForeArmTwist1",
+    "RightForeArmTwist2",
+    "RightHand"
+  ],
+  "joint_count": 41,
+  "rendered_triangles": 12975,
+  "textures": [
+    {
+      "name": "NormalGL_800f0def-e6ec-4e62-a321-133bb6d5092e",
+      "size": [
+        2048,
+        2048
+      ],
+      "mime": "image/png"
+    },
+    {
+      "name": "Color_800f0def-e6ec-4e62-a321-133bb6d5092e",
+      "size": [
+        2048,
+        2048
+      ],
+      "mime": "image/jpeg"
+    },
+    {
+      "name": "ORM_800f0def-e6ec-4e62-a321-133bb6d5092e",
+      "size": [
+        2048,
+        2048
+      ],
+      "mime": "image/jpeg"
+    }
+  ],
+  "has_base_color_texture": true,
+  "clips": {
+    "idle": 15.367,
+    "jump": 2.233,
+    "walk": 2.367,
+    "wave": 3.2
+  },
+  "model_height_bind_pose": 0.9980474352318112,
+  "wave_peak_rotation_deg": {
+    "RightArm": 94.67019505225625,
+    "RightArmTwist1": 1.1000103948581645e-05,
+    "RightArmTwist2": 9.956626120759437e-06,
+    "RightForeArm": 132.72035058879592,
+    "RightForeArmTwist1": 1.3499346641909611e-05,
+    "RightForeArmTwist2": 9.734517300533532e-06,
+    "RightHand": 17.693165177789712
+  },
+  "wave_oscillation_count": {
+    "RightArm": 1.0,
+    "RightArmTwist1": 0,
+    "RightArmTwist2": 0,
+    "RightForeArm": 3.0,
+    "RightForeArmTwist1": 0,
+    "RightForeArmTwist2": 0,
+    "RightHand": 0
+  },
+  "wave_root_hips_translation_range": {
+    "Root": {
+      "range_units": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "range_pct_height": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    "Hips": {
+      "range_units": [
+        0.0,
+        5.551115123125783e-17,
+        5.551115123125783e-17
+      ],
+      "range_pct_height": [
+        0.0,
+        5.561975240020986e-15,
+        5.561975240020986e-15
+      ]
+    },
+    "Pelvis": {
+      "range_units": [
+        0.0,
+        5.551115123125783e-17,
+        5.551115123125783e-17
+      ],
+      "range_pct_height": [
+        0.0,
+        5.561975240020986e-15,
+        5.561975240020986e-15
+      ]
+    }
+  },
+  "torso_vertex_count": 5958,
+  "wave_worst_frame_time": 0.5,
+  "torso_max_displacement_units": 0.032724871284998305,
+  "torso_max_displacement_pct_height": 3.2788893723671033,
+  "torso_mean_displacement_pct_height_at_worst_frame": 0.006429814839143032
+}
