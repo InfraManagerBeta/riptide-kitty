@@ -4,42 +4,47 @@
   "spec_pin": "b5ad427",
   "tool": "Tripo3D",
   "api_base": "https://api.tripo3d.ai/v2/openapi",
-  "note_on_api_version": "The v3 REST surface (openapi.tripo3d.ai/v3) rejected this session's vaulted TRIPO_API_KEY at the egress gateway; the stable v2 surface (api.tripo3d.ai/v2/openapi, documented at docs.tripo3d.ai) authenticated successfully and was used for the entire pipeline. Same underlying models/tasks, older REST shape.",
+  "note_on_api_version": "The v3 REST surface (openapi.tripo3d.ai/v3) rejected this session's vaulted TRIPO_API_KEY at the egress gateway; the stable v2 surface (api.tripo3d.ai/v2/openapi, documented at docs.tripo3d.ai) authenticated successfully and was used for the entire pipeline, both rounds. Same underlying models/tasks, older REST shape.",
   "credential_reference": "TRIPO_API_KEY (environment variable name only; never logged or committed)",
+  "round": 2,
+  "round_2_objective": "FIX ROUND 1 for ticket t1: separate the arms (no fused lobe), stop the arm-chain weight leak into the face, wave in the model's frontal plane instead of sagittal, a real crouch->leap->land jump, an in-place walk loop -- per the two-probe gate findings on commit 24e24f2 (reviewer + tester + manager repro) and the manager's ruling to prefer a cleaner-bind-pose regeneration first, scripted skin-weight cleanup as a documented fallback.",
   "pipeline": [
     {
       "stage": "1a. image derivation - generate multiview from front reference",
       "task_type": "generate_multiview_image",
       "task_id": "372023f8-617d-4bda-ae3f-6b31ebe66717",
+      "reused_from": "round 1 (same task_id, re-queried via get_task -- Tripo retains task results; no new credit consumed re-using it as this round's edit_multiview_image original_task_id)",
       "model_version": "default",
       "input_image": "reference/kitty-front.png",
       "prompt": null,
-      "note": "Tripo regenerates a consistent 4-view (front/left/back/right) turnaround from a single input image. Used as the base for the arms-apart edit below (per the work order: derive the A-pose variant with Tripo's own tooling, not by feeding the raw pressed-arms views straight to generation).",
-      "output_saved_as": "assets/kitty/derived/kitty-multiview-base-front.jpg (front view only, for reference; back/left/right were intermediate and superseded by the edited set)",
-      "consumed_credit": 10
+      "note": "Tripo regenerates a consistent 4-view (front/left/back/right) turnaround from a single input image. FIX for finding #9 (provenance missing derived images): all four views of this task are committed this round (assets/kitty/derived/kitty-multiview-base-{front,left,back,right}.jpg) -- round 1 committed only the front view and left the other three neither saved nor hashed.",
+      "output_saved_as": [
+        "assets/kitty/derived/kitty-multiview-base-front.jpg",
+        "assets/kitty/derived/kitty-multiview-base-left.jpg",
+        "assets/kitty/derived/kitty-multiview-base-back.jpg",
+        "assets/kitty/derived/kitty-multiview-base-right.jpg"
+      ],
+      "consumed_credit_this_round": 0,
+      "consumed_credit_when_first_created_round_1": 10
     },
     {
-      "stage": "1b. image derivation - arms-apart / A-pose edit",
+      "stage": "1b. image derivation - LOWER arms-apart A-pose edit (regenerated this round)",
       "task_type": "edit_multiview_image",
-      "task_id": "ae573a46-088f-4010-8fcc-46d07b68fb5c",
+      "task_id": "56f79c18-81fd-4753-a70b-6b44b391c0ba",
       "original_task_id": "372023f8-617d-4bda-ae3f-6b31ebe66717",
-      "prompt_applied_to_all_four_views": "Keep this exact same chubby cartoon cat unchanged in every way -- same warm yellow-orange fur color, same cream belly patch, same big round green eyes, same face, same head tufts, same curled tail -- but change only the pose: lift both short arms up and away from the sides of the torso into a relaxed A-pose, so there is a clear, visible gap of open background space between each arm and the flank/belly, with the rounded paws no longer touching the body. Also move the two legs slightly further apart at a relaxed stance. Do not change color, proportions, face, or tail.",
+      "prompt_applied_to_all_four_views": "Keep this exact same chubby cartoon cat completely unchanged in color, proportions, face, head tufts, ears, and curled tail -- warm yellow-orange fur, cream belly patch, big round green-and-black eyes, pink nose and tongue. Change ONLY the arm pose: move both short arms so they point outward and downward at roughly 35-40 degrees below horizontal (like a relaxed low A-pose), elbows only slightly bent, so there is a clear, unmistakable wedge of open white background between each entire arm and the torso/belly from shoulder to paw -- the paw must not touch or overlap the body silhouette. Both arms must be perfectly symmetric: identical length, identical angle, identical pose, mirrored left and right, at the same height on the torso. Do not raise the arms overhead. Do not show any extra or doubled arm shape. Only one clean arm per side, fully separated from the body outline. Legs stay in their normal standing position, feet on the ground.",
       "views_edited": ["front", "back", "left", "right"],
-      "result": "Tripo raised both arms into a symmetric overhead 'cheer' pose with a large, unambiguous gap to the torso on all views (front/back very clean; right view shows a slightly lower/more casual arm angle than front/left/back, a minor cross-view inconsistency that did not visibly harm the generated mesh).",
-      "output_saved_as": [
-        "assets/kitty/derived/kitty-apose-front.jpg",
-        "assets/kitty/derived/kitty-apose-back.jpg",
-        "assets/kitty/derived/kitty-apose-left.jpg",
-        "assets/kitty/derived/kitty-apose-right.jpg"
-      ],
+      "why_regenerated": "Round 1's edit (task ae573a46, kept below under superseded_round_1) raised both arms overhead into a symmetric 'cheer' pose on front/back/left, but its RIGHT view broke symmetry: one arm stayed lower/pressed near the torso while the other was overhead -- a cross-view pose inconsistency that fed multiview_to_model a 3D-inconsistent target, and the reconstruction filled the gap with a second, fused arm-shaped lobe on the right flank (reviewer finding #2). It also kept the bind pose far from a neutral standing pose, which the manager's ruling flagged as the likely root cause of the arm-chain weight bleeding into the head/face (finding #1).",
+      "result": "Every one of the four re-generated views was inspected before proceeding (see assets/kitty/derived/kitty-apose-{front,back,left,right}.jpg): front/back/left/right all show exactly ONE clean arm per side, a clear gap to the torso, and (front vs back vs left vs right) no doubled or pressed lower-arm silhouette anywhere -- a materially cleaner set than round 1's. Minor residual imperfection: the raise ANGLE is not perfectly identical between the front view (~35 deg down) and the left/back/right views (~10-15 deg down, closer to horizontal); this did not reproduce any fused-limb artifact in the resulting mesh (checked by rendering the raw generated mesh from all four axis-aligned views before rigging -- see stage 2 note).",
+      "attempts": 1,
       "consumed_credit": 20
     },
     {
       "stage": "2. mesh + texture generation",
       "task_type": "multiview_to_model",
-      "task_id": "800f0def-e6ec-4e62-a321-133bb6d5092e",
+      "task_id": "e23f40e6-9c18-46ea-aa58-9639b96fda57",
       "model_version": "P1-20260311",
-      "original_task_id": "ae573a46-088f-4010-8fcc-46d07b68fb5c",
+      "original_task_id": "56f79c18-81fd-4753-a70b-6b44b391c0ba",
       "parameters": {
         "face_limit": 14000,
         "texture": true,
@@ -48,80 +53,103 @@
         "texture_alignment": "original_image",
         "orientation": "align_image"
       },
-      "result_rendered_triangles": 12975,
+      "result_rendered_triangles": 13039,
       "attempts": 1,
-      "note": "Single attempt was sufficient: the arms-apart derived images produced a mesh with the arms clearly separated from the torso by open space (inspected via the rendered_image preview and via the project's own matplotlib-based mesh renderer before rigging).",
+      "inspection": "Downloaded the raw (unrigged) mesh and rendered it from all four axis-aligned candidate views (own script, scripts/pipeline/render_preview.py's projection convention) before rigging: front/back/left/right all show exactly two arms, symmetric within ~10%, clear gap to the torso, NO extra lobe/limb on either flank. This is the check finding #2 asked for; round 1's provenance recorded only a single rendered_image inspection and missed the flank lobe.",
       "consumed_credit": 50
     },
     {
       "stage": "3. rig compatibility check",
       "task_type": "animate_prerigcheck",
-      "task_id": "6efe367b-44d9-41d1-8916-ce1196900ee9",
-      "original_model_task_id": "800f0def-e6ec-4e62-a321-133bb6d5092e",
+      "task_id": "d1074a7b-4b09-4ac3-b03a-5d7bae129178",
+      "original_model_task_id": "e23f40e6-9c18-46ea-aa58-9639b96fda57",
       "result": { "riggable": true, "rig_type": "biped", "topology": "biped" },
       "consumed_credit": 0
     },
     {
       "stage": "4. auto-rig",
       "task_type": "animate_rig",
-      "task_id": "1d1915e1-4b09-4323-a808-b0f8f6bb9796",
-      "original_model_task_id": "800f0def-e6ec-4e62-a321-133bb6d5092e",
+      "task_id": "ee15e4b9-15ab-4204-a724-c76deb9d3966",
+      "original_model_task_id": "e23f40e6-9c18-46ea-aa58-9639b96fda57",
       "model_version": "v1.0-20240301",
       "rig_type": "biped",
       "spec": "tripo",
       "joints": 41,
-      "note": "An earlier rig attempt with spec=mixamo (task c722e95a-fd56-4b0c-a4ca-ef16c742f7c8, 25 credits) produced Mixamo-style bone names directly, but animate_retarget then failed (error 1004) against that rig for every preset -- Tripo's preset animation library appears to require the native 'tripo' bone spec. Re-rigged with spec=tripo (this task) and retargeted successfully; joints were renamed to Mixamo-style names (see 'joint_rename' below) as a cosmetic, index-preserving relabel afterwards so validator name-pattern matching (arm|hand|shoulder|clavicle|...) still works.",
-      "consumed_credit": 25,
-      "discarded_attempt": {
-        "task_type": "animate_rig",
-        "task_id": "c722e95a-fd56-4b0c-a4ca-ef16c742f7c8",
-        "spec": "mixamo",
-        "reason_discarded": "animate_retarget rejected this rig for every preset animation (error_code 1004) -- presets require spec=tripo bone naming",
-        "consumed_credit": 25
-      }
+      "note": "spec=tripo again this round (spec=mixamo failed animate_retarget with error 1004 in round 1's discovery -- not re-tested, no reason to expect it changed). Joints renamed Mixamo-style afterwards via scripts/pipeline/joint_rename_map.json (cosmetic, index-preserving), same as round 1.",
+      "post_rig_inspection": {
+        "arm_chain_length_left": 0.3165,
+        "arm_chain_length_right": 0.3298,
+        "ratio": 1.042,
+        "note": "within the work order's 10% left/right symmetry bar (round 1 was 2.4x, 0.148 vs 0.362). Computed straight from the skin's inverse-bind matrices, same method the manager used to catch round 1's fused arm.",
+        "head_neck_dominant_vertices_with_over_0.2_arm_weight_before_cleanup": 768,
+        "head_neck_dominant_vertices_total": 5757,
+        "comparison_to_round_1": "round 1: 5,332/8,695 head-region vertices > 0.2 arm weight (61%). This round's regenerated, closer-to-neutral bind pose alone cut that to 768/5,757 (13%) before any scripted cleanup -- consistent with the manager's ruling that a cleaner-bind-pose regeneration is the preferred fix, with scripted cleanup only needed for the remainder."
+      },
+      "consumed_credit": 25
     },
     {
-      "stage": "5a. animation retarget - idle (preset)",
+      "stage": "4b. skin-weight cleanup (scripted, documented fallback per the manager's ruling)",
+      "task_type": null,
+      "script": "scripts/pipeline/clean_skin_weights.py",
+      "why": "Regeneration alone (stage 1b/2/4 above) removed the fused-arm lobe entirely and cut head/neck arm-weight leakage from 61% to 13% of head/neck-dominant vertices, but did not reach zero. Per the manager's ruling, a documented scripted cleanup is an acceptable fallback for the remainder: this script zeroes arm-chain (shoulder/upper-arm/forearm/hand, both twist bones) weight on any vertex NOT dominated by that arm chain -- i.e. off every Head/Neck/torso/leg/tail vertex and off the OTHER (non-dominant) arm -- and renormalizes. It is a pure per-vertex weight edit: no geometry, joint hierarchy, or bind pose is touched.",
+      "result": "0/5,757 Head-or-Neck-dominant vertices now carry any arm-chain weight (was 768); 0 cross-contamination between the left and right arm chains. 5,184/13,286 total vertices (39%) had some weight adjusted, all of it weight that would otherwise have dragged a non-arm vertex when only one arm animates.",
+      "consumed_credit": 0
+    },
+    {
+      "stage": "5a. animation retarget - idle (preset, used as-is)",
       "task_type": "animate_retarget",
-      "task_id": "4821b13a-e430-45b4-a162-b8e9592340cb",
-      "original_model_task_id": "1d1915e1-4b09-4323-a808-b0f8f6bb9796",
+      "task_id": "56fd7107-1f0c-4f8b-9cb1-67610bf24e48",
+      "original_model_task_id": "ee15e4b9-15ab-4204-a724-c76deb9d3966",
       "animation": "preset:idle",
       "clip_kind": "preset",
       "duration_s": 15.367,
+      "note": "re-retargeted against this round's new rig (round 1's idle clip was against the old, fused-arm rig and can't be reused). Verified: every channel loops (first sample == last sample) within tolerance already, no fix needed.",
       "consumed_credit": 10
     },
     {
-      "stage": "5b. animation retarget - jump (preset)",
+      "stage": "5b. animation - jump (AUTHORED this round; preset retarget fetched, diagnosed, and discarded)",
       "task_type": "animate_retarget",
-      "task_id": "f8d9bbbd-e99a-4720-8ef9-715fa0617e3f",
-      "original_model_task_id": "1d1915e1-4b09-4323-a808-b0f8f6bb9796",
+      "task_id": "8fb1873f-14f2-4d1d-8e03-c2e1cac49d31",
+      "clip_kind": "preset (discarded) -> authored",
+      "original_model_task_id": "ee15e4b9-15ab-4204-a724-c76deb9d3966",
       "animation": "preset:jump",
-      "clip_kind": "preset",
-      "duration_s": 2.233,
+      "preset_diagnosis": "Sampled the retargeted preset with scripts/pipeline/gltf_anim.py: Hips oscillates 0.174-0.278 (5 repeating bounces over the clip's 2.233s), the single best individual bounce clears only ~9.4% of model height measured from the CLIP's own start frame (below the work order's >=10%h bar for accepting a preset sub-range) -- and qualitatively it reads as a bounce loop, not the spec's 'anticipation crouch -> leap -> land'. Per the work order ('use a preset sub-range if one hop meets that, otherwise author it on the rig'), this was authored instead.",
+      "authored_replacement": {
+        "script": "scripts/pipeline/keyframe_jump.py",
+        "duration_s": 1.0,
+        "mechanics": "Hips translates along the rig's own verified world-up axis (crouch dip -> leap rise -> land); Thigh/Calf rotate about the rig's verified world-Z hinge axis for a small anticipation/landing knee bend (kept deliberately shallow -- this character's stubby legs self-intersect the belly mesh at a more 'realistic' bend angle, checked visually via render_preview.py before reducing it). Every other joint (arms, spine, head) pinned to the idle clip's frame-0 pose; Root translation stays at 0 throughout (in place).",
+        "measured": {"foot_rise_pct_height": 14.7, "threshold_pct_height": 10, "crouch_dip_pct_height": "1.4-2.8 (both feet)"}
+      },
       "consumed_credit": 10
     },
     {
-      "stage": "5c. animation retarget - walk (preset)",
+      "stage": "5c. animation - walk (preset retargeted, then scripted in-place fix)",
       "task_type": "animate_retarget",
-      "task_id": "afc84a88-dcd1-459d-bc63-7e6e747c8959",
-      "original_model_task_id": "1d1915e1-4b09-4323-a808-b0f8f6bb9796",
+      "task_id": "ec53ce57-f81b-4ee6-a8fd-43b5ccbfddb7",
+      "original_model_task_id": "ee15e4b9-15ab-4204-a724-c76deb9d3966",
       "animation": "preset:walk",
-      "clip_kind": "preset",
+      "clip_kind": "preset + scripted fix",
       "duration_s": 2.367,
+      "diagnosis": "Sampled every channel's first vs. last keyframe: only Hips.translation differs (56.9% of model height net drift along the model's forward axis) -- Root itself never moves, and every rotation channel plus the other two translation axes already loop perfectly.",
+      "fix": {
+        "script": "scripts/pipeline/fix_walk_inplace.py",
+        "method": "Linearly detrend the Hips local-translation axes with first!=last (identified automatically, not hard-coded) so each equals its own first sample exactly at the clip's end, leaving the cyclic in-between shape (gait sway/bob) untouched.",
+        "result": "Hips world-space translation range now: X 1.55%h, Y (vertical bob) 0.80%h, Z (lateral sway, in-cycle only) 7.0%h; first-frame == last-frame on every channel within tolerance (V5)."
+      },
       "consumed_credit": 10
     },
     {
-      "stage": "5d. animation - wave (authored, no Tripo preset exists)",
+      "stage": "5d. animation - wave (authored, no Tripo preset exists) -- REWRITTEN this round for the frontal-plane fix",
       "task_type": null,
       "task_id": null,
       "clip_kind": "authored",
       "duration_s": 3.2,
-      "note": "Tripo's preset library (checked via the retarget docs) offers: idle, walk, run, dive, climb, jump, slash, shoot, hurt, fall, turn, and quadruped/hexapod/octopod/serpentine/aquatic marches -- no 'wave'. Per the work order this is explicitly permitted: the wave clip is hand-keyframed directly on the generated rig's own joints (RightArm/RightForeArm), using the idle clip's neutral standing pose (sampled at t=0) as the constant baseline for every other joint so the wave clip's rest stance matches idle/jump/walk instead of the raw arms-apart bind pose. Mesh and skeleton remain 100% Tripo-generated; only these animation curves are hand-authored.",
+      "note": "Tripo's preset library has no 'wave' motion (unchanged from round 1). Round 1's script rotated the shoulder/forearm about the model's world Z axis, sweeping the arm through the SAGITTAL (forward/back) plane -- reviewer finding #3. This round's facing axis was RE-VERIFIED for the regenerated mesh (not assumed carried over): rendering the raw model from four axis-aligned candidate cameras shows the face square-on only from world +X, so the frontal plane (up x left-right) is Y-Z, and the fix is to rotate about world X instead. Per-side sign (which way is 'outward + up' for each arm) was verified numerically via forward kinematics on the neutral pose before picking defaults, not assumed symmetric.",
       "script": "scripts/pipeline/keyframe_wave.py",
       "parameters": {
         "side": "R",
-        "raise_deg": 70,
-        "wave_amp_deg": 24,
+        "raise_deg": 120,
+        "wave_amp_deg": 30,
         "wave_period_s": 0.8
       },
       "consumed_credit": 0
@@ -129,18 +157,10 @@
     {
       "stage": "6. merge into a single GLB",
       "task_type": null,
-      "note": "All four clips share one skeleton+skin (they all trace back to rig task 1d1915e1-...). Channels were copied by joint NAME (not raw index) from each source clip onto one base rigged model, per the work order.",
+      "note": "All four clips share one skeleton+skin (idle/jump/walk trace back to rig task ee15e4b9; wave and the authored jump are keyframed directly on that same rig's base, post skin-cleanup). Channels copied by joint NAME (not raw index) from each source clip onto the CLEANED base rigged model (stage 4b's output), per the work order.",
       "script": "scripts/pipeline/merge_clips.py",
-      "joint_rename_map": "scripts/pipeline/joint_rename_map.json (cosmetic node-name relabel, tripo spec -> Mixamo-style names; does not touch node indices, skin, or animation data)"
+      "joint_rename_map": "scripts/pipeline/joint_rename_map.json (cosmetic node-name relabel, tripo spec -> Mixamo-style names; does not touch node indices, skin, or animation data; unchanged from round 1)"
     }
-  ],
-  "discarded_or_failed_tripo_tasks": [
-    {"task_type": "text_to_model", "task_id": "a2026076-77ba-4e2f-81ce-2a049905d451", "reason": "accidental connectivity/auth smoke-test against the v3 endpoint pattern before discovering v2 was the working surface; not part of the asset pipeline", "consumed_credit": 20},
-    {"task_type": "animate_retarget", "task_id": "cb426ea4-486e-4b9c-aa09-d222d77de260", "animation": "preset:idle", "spec_of_source_rig": "mixamo", "status": "failed", "error_code": 1004, "consumed_credit": 0},
-    {"task_type": "animate_retarget", "task_id": "eeb4cbd2-c98f-4b04-ac0b-8457bc76223b", "animation": "preset:idle", "spec_of_source_rig": "mixamo", "status": "failed", "error_code": 1004, "consumed_credit": 0},
-    {"task_type": "animate_retarget", "task_id": "fd8fc02a-6c4a-42f5-b3b4-7a5d1f2f8f6e", "animation": "preset:walk", "spec_of_source_rig": "mixamo", "status": "failed", "error_code": 1004, "consumed_credit": 0},
-    {"task_type": "animate_retarget", "task_id": "c39f60c8-aba1-4b6d-aada-33db7b8d92ac", "animation": "preset:run", "spec_of_source_rig": "mixamo", "status": "failed", "error_code": 1004, "consumed_credit": 0},
-    {"task_type": "animate_retarget", "task_id": "e0d9a34e-6b0f-4d50-9833-74d27119256b", "animation": "preset:jump", "spec_of_source_rig": "mixamo", "status": "failed", "error_code": 1004, "consumed_credit": 0}
   ],
   "reference_images_used": [
     "reference/kitty-front.png",
@@ -149,28 +169,75 @@
     "reference/kitty-right.png"
   ],
   "derived_images": [
-    "assets/kitty/derived/kitty-multiview-base-front.jpg",
-    "assets/kitty/derived/kitty-apose-front.jpg",
-    "assets/kitty/derived/kitty-apose-back.jpg",
-    "assets/kitty/derived/kitty-apose-left.jpg",
-    "assets/kitty/derived/kitty-apose-right.jpg"
+    {"path": "assets/kitty/derived/kitty-multiview-base-front.jpg", "task_id": "372023f8-617d-4bda-ae3f-6b31ebe66717", "sha256": "7fa091cbe2ae447f1246d99bf34c3d9b821c5030a028fdadef801506d6359fc3"},
+    {"path": "assets/kitty/derived/kitty-multiview-base-left.jpg", "task_id": "372023f8-617d-4bda-ae3f-6b31ebe66717", "sha256": "9000f263410d376695776c7f8a7cfb8d7bb99f2d51f1e79fbd36a4a0915bf730"},
+    {"path": "assets/kitty/derived/kitty-multiview-base-back.jpg", "task_id": "372023f8-617d-4bda-ae3f-6b31ebe66717", "sha256": "b5cb22945da55698623d3084365f4aeb0233377499e617a3799fbd086b0bf5b1"},
+    {"path": "assets/kitty/derived/kitty-multiview-base-right.jpg", "task_id": "372023f8-617d-4bda-ae3f-6b31ebe66717", "sha256": "f4916bb154d454cf36c8bd6e7424c343d4930655a513a0b94be5f77f444c9c8d"},
+    {"path": "assets/kitty/derived/kitty-apose-front.jpg", "task_id": "56f79c18-81fd-4753-a70b-6b44b391c0ba", "sha256": "a6b46090de3c4111ec8d10507a1b5515dde738ba67cf7bc495af27781b7f193d"},
+    {"path": "assets/kitty/derived/kitty-apose-back.jpg", "task_id": "56f79c18-81fd-4753-a70b-6b44b391c0ba", "sha256": "9341e965496b835b68d79f10ad72b3a0a5a6be66a874699fb92612a05a07f1e7"},
+    {"path": "assets/kitty/derived/kitty-apose-left.jpg", "task_id": "56f79c18-81fd-4753-a70b-6b44b391c0ba", "sha256": "0feecbf40f415e43c4afc0c63b94b5d454e76b28fbf1e93a7b277b57fda5175a"},
+    {"path": "assets/kitty/derived/kitty-apose-right.jpg", "task_id": "56f79c18-81fd-4753-a70b-6b44b391c0ba", "sha256": "f7024bb2edd934907aa32a369d71784e9d2fd0784c23f6324c45d9f2bef1d767"}
   ],
+  "superseded_round_1": {
+    "note": "Kept for audit trail -- these task IDs and derived images are from round 1 (commit 24e24f2) and are NOT part of the current asset. round 1's rig (task 1d1915e1, built from these images) had the fused-arm lobe (finding #2) and the face weight leak (finding #1); its wave clip (task-less, scripts/pipeline/keyframe_wave.py as it existed at 24e24f2) waved in the sagittal plane (finding #3); its jump/walk used the untouched Tripo presets (findings #4, #5).",
+    "task_ids": {
+      "1a_generate_multiview_image": "372023f8-617d-4bda-ae3f-6b31ebe66717",
+      "1b_edit_multiview_image": "ae573a46-088f-4010-8fcc-46d07b68fb5c",
+      "2_multiview_to_model": "800f0def-e6ec-4e62-a321-133bb6d5092e",
+      "3_animate_prerigcheck": "6efe367b-44d9-41d1-8916-ce1196900ee9",
+      "4_animate_rig_tripo_spec": "1d1915e1-4b09-4323-a808-b0f8f6bb9796",
+      "4_animate_rig_mixamo_spec_discarded": "c722e95a-fd56-4b0c-a4ca-ef16c742f7c8",
+      "5a_retarget_idle": "4821b13a-e430-45b4-a162-b8e9592340cb",
+      "5b_retarget_jump": "f8d9bbbd-e99a-4720-8ef9-715fa0617e3f",
+      "5c_retarget_walk": "afc84a88-dcd1-459d-bc63-7e6e747c8959",
+      "discarded_or_failed": [
+        {"task_type": "text_to_model", "task_id": "a2026076-77ba-4e2f-81ce-2a049905d451", "reason": "accidental v3-endpoint smoke test"},
+        {"task_type": "animate_retarget", "task_id": "cb426ea4-486e-4b9c-aa09-d222d77de260", "reason": "mixamo-spec rig rejected by retarget (error 1004)"},
+        {"task_type": "animate_retarget", "task_id": "eeb4cbd2-c98f-4b04-ac0b-8457bc76223b", "reason": "mixamo-spec rig rejected by retarget (error 1004)"},
+        {"task_type": "animate_retarget", "task_id": "fd8fc02a-6c4a-42f5-b3b4-7a5d1f2f8f6e", "reason": "mixamo-spec rig rejected by retarget (error 1004)"},
+        {"task_type": "animate_retarget", "task_id": "c39f60c8-aba1-4b6d-aada-33db7b8d92ac", "reason": "mixamo-spec rig rejected by retarget (error 1004)"},
+        {"task_type": "animate_retarget", "task_id": "e0d9a34e-6b0f-4d50-9833-74d27119256b", "reason": "mixamo-spec rig rejected by retarget (error 1004)"}
+      ]
+    },
+    "derived_images_kept_for_audit": [
+      "assets/kitty/derived/superseded_round_1/kitty-multiview-base-front.jpg (only view round 1 actually committed at the time)",
+      "assets/kitty/derived/superseded_round_1/kitty-apose-front.jpg",
+      "assets/kitty/derived/superseded_round_1/kitty-apose-back.jpg",
+      "assets/kitty/derived/superseded_round_1/kitty-apose-left.jpg",
+      "assets/kitty/derived/superseded_round_1/kitty-apose-right.jpg (this is the view whose lower/pressed arm produced the fused-limb reconstruction, per finding #2)"
+    ],
+    "credits_consumed_round_1_total": 180
+  },
   "clips": {
     "idle": {"kind": "preset", "tripo_preset": "preset:idle", "duration_s": 15.367},
-    "jump": {"kind": "preset", "tripo_preset": "preset:jump", "duration_s": 2.233},
-    "walk": {"kind": "preset", "tripo_preset": "preset:walk", "duration_s": 2.367},
-    "wave": {"kind": "authored", "script": "scripts/pipeline/keyframe_wave.py", "duration_s": 3.2}
+    "jump": {"kind": "authored", "script": "scripts/pipeline/keyframe_jump.py", "duration_s": 1.0, "note": "preset:jump was retargeted, diagnosed as a 5-bounce loop with no single hop clearing the work order's 10%h bar, and discarded in favor of an authored crouch->leap->land -- see pipeline stage 5b"},
+    "walk": {"kind": "preset + scripted fix", "tripo_preset": "preset:walk", "duration_s": 2.367, "fix_script": "scripts/pipeline/fix_walk_inplace.py", "note": "Hips horizontal drift removed so the cycle is in place; vertical bob and lateral sway are the untouched preset motion"},
+    "wave": {"kind": "authored", "script": "scripts/pipeline/keyframe_wave.py", "duration_s": 3.2, "note": "rewritten this round to sweep in the model's frontal (Y-Z) plane instead of round 1's sagittal-plane sweep"}
+  },
+  "skin_weight_cleanup": {
+    "kind": "scripted, documented fallback (manager's ruling for this round)",
+    "script": "scripts/pipeline/clean_skin_weights.py",
+    "applied_to": "the rigged base model (assets/kitty/kitty.glb's skin), before any clip was merged in",
+    "summary": "zeroes arm-chain (shoulder/upper-arm/forearm/hand + twist bones, either side) skin weight on any vertex not dominated by that same arm chain, then renormalizes; see pipeline stage 4b for the measured before/after."
   },
   "scripts_used": {
-    "tripo_client.py": "Minimal v2 openapi client (upload/create_task/poll/download); reads TRIPO_API_KEY from the environment only.",
-    "keyframe_wave.py": "Authors the 'wave' clip on the rig's own RightArm/RightForeArm joints, FK-consistent, pinned to the idle-neutral pose on every other joint.",
-    "merge_clips.py": "Copies animation channels (matched by joint name) from the separate idle/jump/walk/wave clip GLBs onto one base rigged GLB with a single skeleton+skin; also applies the cosmetic joint rename.",
-    "gltf_anim.py": "Shared glTF FK + linear-blend-skinning evaluator used by keyframe_wave.py, verify_kitty.py, and render_preview.py.",
-    "verify_kitty.py": "Self-verification report: skin/joint counts, triangle count, textures, clip durations, and wave-specific numbers (arm rotation, oscillation count, root/hips translation range, torso vertex displacement).",
-    "render_preview.py": "CPU-only orthographic preview renderer (matplotlib painter's-algorithm rasterizer) used to render assets/kitty/previews/wave-*.png and to visually inspect the mesh/pose before and after rigging."
+    "tripo_client.py": "Minimal v2 openapi client (upload/create_task/poll/download); reads TRIPO_API_KEY from the environment only. Unchanged from round 1.",
+    "keyframe_wave.py": "REWRITTEN this round: authors 'wave' about the model's verified world-X (forward) axis -- frontal-plane sweep -- instead of round 1's world-Z (sagittal) sweep. Same FK-consistent technique otherwise (idle-neutral baseline, forearm follows upperarm).",
+    "keyframe_jump.py": "NEW this round: authors 'jump' (Hips translation + Thigh/Calf rotation, both axes verified via FK on the neutral pose, not assumed) as one crouch -> leap -> land, replacing the Tripo preset's repeating small bounces.",
+    "fix_walk_inplace.py": "NEW this round: linearly detrends whichever Hips local-translation axis has first != last keyframe values in the retargeted 'walk' preset, removing the baked-in forward stride distance so the cycle loops in place.",
+    "clean_skin_weights.py": "NEW this round: scripted skin-weight cleanup (documented fallback per the manager's ruling) -- zeroes arm-chain weight on any vertex not dominated by that arm chain and renormalizes.",
+    "merge_clips.py": "Copies animation channels (matched by joint name) from the separate idle/jump/walk/wave clip GLBs onto one base rigged GLB with a single skeleton+skin; also applies the cosmetic joint rename. Unchanged from round 1.",
+    "gltf_anim.py": "Shared glTF FK + linear-blend-skinning evaluator used by every other script here. Unchanged from round 1.",
+    "verify_kitty_v2.py": "NEW this round: self-verification against the V1-V6 contract (see kitty.verify.json) -- independent of scripts/validate-kitty.mjs (out of this round's touch-scope; t2 owns it this round).",
+    "verify_kitty.py": "round 1's self-verification script (wave-only numbers); kept for reference, superseded by verify_kitty_v2.py for this round's reporting.",
+    "render_preview_textured.py": "NEW this round: a z-buffered, numpy-vectorized software rasterizer that samples the model's own PBR base-color texture via UV coordinates (round 1's render_preview.py was flat-shaded/untextured -- advisory finding #16). Supports arbitrary azimuth (for the '3/4' views), a face-focus crop, and a fixed shared camera window across a sequence of frames (used for the jump crouch/apex/land triple so the rise is visible against a stable frame). Does not mirror the projection at any azimuth.",
+    "render_preview.py": "round 1's flat-shaded preview renderer (also used this round for quick numeric/pose sanity renders during development, e.g. the jump clipping check); the committed previews/ images are all from render_preview_textured.py."
   },
-  "credits_consumed_total_from_task_ledger": 180,
-  "credits_consumed_observed_wallet_delta": 160,
-  "credit_accounting_note": "Summing consumed_credit across every task queried above gives 180 credits; the account balance only dropped by 160 (4700 -> 4540) over the same session. The discrepancy is unexplained (possibly a promotional/rounding adjustment on Tripo's side) and is reported as-is rather than reconciled.",
-  "usd_rate": "100 credits = $1.00 USD (per https://developers.tripo3d.ai/en/pricing)"
+  "credits_consumed_this_round": {
+    "from_task_ledger_sum_excluding_reused_task": 125,
+    "observed_wallet_delta": 125,
+    "note": "exact match this round (round 1 had an unreconciled 20-credit gap between ledger sum and wallet delta; this round's ledger sum already excludes the reused stage-1a task's original 10-credit charge, since re-using an existing task_id as an edit_multiview_image origin does not re-charge it)."
+  },
+  "usd_rate": "100 credits = $1.00 USD (per https://developers.tripo3d.ai/en/pricing)",
+  "usd_estimate_this_round": "125 credits / 100 * $1.00 = $1.25 (ESTIMATE)"
 }

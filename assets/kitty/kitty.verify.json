@@ -1,145 +1,146 @@
 {
   "file": "assets/kitty/kitty.glb",
-  "file_size_bytes": 3719420,
-  "skin_count": 1,
-  "joint_names": [
-    "Root",
-    "Hips",
-    "Pelvis",
-    "LeftUpLeg",
-    "LeftLeg",
-    "LeftFoot",
-    "LeftToeBase",
-    "LeftLegTwist1",
-    "LeftLegTwist2",
-    "LeftUpLegTwist1",
-    "LeftUpLegTwist2",
-    "RightUpLeg",
-    "RightUpLegTwist1",
-    "RightUpLegTwist2",
-    "RightLeg",
-    "RightFoot",
-    "RightToeBase",
-    "RightLegTwist1",
-    "RightLegTwist2",
-    "Spine",
-    "Spine1",
-    "Spine2",
-    "Neck",
-    "Neck1",
-    "Head",
-    "LeftShoulder",
-    "LeftArm",
-    "LeftForeArm",
-    "LeftForeArmTwist1",
-    "LeftForeArmTwist2",
-    "LeftHand",
-    "LeftArmTwist1",
-    "LeftArmTwist2",
-    "RightShoulder",
-    "RightArm",
-    "RightArmTwist1",
-    "RightArmTwist2",
-    "RightForeArm",
-    "RightForeArmTwist1",
-    "RightForeArmTwist2",
-    "RightHand"
-  ],
-  "joint_count": 41,
-  "rendered_triangles": 12975,
-  "textures": [
-    {
-      "name": "NormalGL_800f0def-e6ec-4e62-a321-133bb6d5092e",
-      "size": [
-        2048,
-        2048
-      ],
-      "mime": "image/png"
+  "checks": {
+    "skin_present": {
+      "pass": true,
+      "detail": {
+        "skin_count": 1
+      }
     },
-    {
-      "name": "Color_800f0def-e6ec-4e62-a321-133bb6d5092e",
-      "size": [
-        2048,
-        2048
-      ],
-      "mime": "image/jpeg"
+    "clip_names_exact": {
+      "pass": true,
+      "detail": {
+        "clips_found": [
+          "idle",
+          "jump",
+          "walk",
+          "wave"
+        ]
+      }
     },
-    {
-      "name": "ORM_800f0def-e6ec-4e62-a321-133bb6d5092e",
-      "size": [
-        2048,
-        2048
-      ],
-      "mime": "image/jpeg"
-    }
-  ],
-  "has_base_color_texture": true,
-  "clips": {
-    "idle": 15.367,
-    "jump": 2.233,
-    "walk": 2.367,
-    "wave": 3.2
-  },
-  "model_height_bind_pose": 0.9980474352318112,
-  "wave_peak_rotation_deg": {
-    "RightArm": 94.67019505225625,
-    "RightArmTwist1": 1.1000103948581645e-05,
-    "RightArmTwist2": 9.956626120759437e-06,
-    "RightForeArm": 132.72035058879592,
-    "RightForeArmTwist1": 1.3499346641909611e-05,
-    "RightForeArmTwist2": 9.734517300533532e-06,
-    "RightHand": 17.693165177789712
-  },
-  "wave_oscillation_count": {
-    "RightArm": 1.0,
-    "RightArmTwist1": 0,
-    "RightArmTwist2": 0,
-    "RightForeArm": 3.0,
-    "RightForeArmTwist1": 0,
-    "RightForeArmTwist2": 0,
-    "RightHand": 0
-  },
-  "wave_root_hips_translation_range": {
-    "Root": {
-      "range_units": [
-        0.0,
-        0.0,
-        0.0
-      ],
-      "range_pct_height": [
-        0.0,
-        0.0,
-        0.0
-      ]
+    "triangle_budget": {
+      "pass": true,
+      "detail": {
+        "rendered_triangles": 13039,
+        "max": 20000
+      }
     },
-    "Hips": {
-      "range_units": [
-        0.0,
-        5.551115123125783e-17,
-        5.551115123125783e-17
-      ],
-      "range_pct_height": [
-        0.0,
-        5.561975240020986e-15,
-        5.561975240020986e-15
-      ]
+    "base_color_texture_real_bytes": {
+      "pass": true,
+      "detail": {
+        "textures": [
+          {
+            "name": "Color_e23f40e6-9c18-46ea-aa58-9639b96fda57",
+            "size": [
+              2048,
+              2048
+            ],
+            "mode": "RGB"
+          }
+        ]
+      }
     },
-    "Pelvis": {
-      "range_units": [
-        0.0,
-        5.551115123125783e-17,
-        5.551115123125783e-17
-      ],
-      "range_pct_height": [
-        0.0,
-        5.561975240020986e-15,
-        5.561975240020986e-15
-      ]
+    "V4_weight_leakage": {
+      "pass": true,
+      "detail": {
+        "head_neck_dominant_vertices": 5757,
+        "leaking_vertices": 0,
+        "max_arm_weight_on_head_neck": 0.0
+      }
+    },
+    "V5_loop_seams": {
+      "pass": true,
+      "detail": {
+        "idle": [],
+        "walk": []
+      }
+    },
+    "V6_jump_clearance": {
+      "pass": true,
+      "detail": {
+        "rise_pct_height_by_joint": {
+          "LeftFoot": 14.70486008214541,
+          "LeftToeBase": 14.70486008214541,
+          "RightFoot": 14.704860082145407,
+          "RightToeBase": 14.704860082145407
+        },
+        "threshold_pct": 8.0
+      }
+    },
+    "V1_wave_arm_rotation_peak": {
+      "pass": true,
+      "detail": {
+        "waving_side": "right",
+        "peak_deg": 119.99999846421777,
+        "min": 45.0
+      }
+    },
+    "V1_wave_hand_above_shoulder": {
+      "pass": true,
+      "detail": {
+        "clearance_pct_height": 22.51238607945494,
+        "min_pct": 5.0
+      }
+    },
+    "V1_wave_oscillations": {
+      "pass": true,
+      "detail": {
+        "oscillations": 2.5,
+        "min": 2
+      }
+    },
+    "V1_other_arm_stable": {
+      "pass": true,
+      "detail": {
+        "resting_side": "left",
+        "peak_deg": 0.0,
+        "max": 15.0
+      }
+    },
+    "V2_root_hips_translation": {
+      "pass": true,
+      "detail": {
+        "max_range_pct_height": 7.0912412383557474e-15,
+        "max_allowed_pct": 5.0
+      }
+    },
+    "V2_torso_rotation": {
+      "pass": true,
+      "detail": {
+        "max_rot_deg": 1.7075472925031877e-06,
+        "max_allowed_deg": 15.0
+      }
+    },
+    "V3_co_deformation_displacement": {
+      "pass": true,
+      "detail": {
+        "non_waving_vertex_count": 10683,
+        "frac_over_3pct_height": 0.0,
+        "max_allowed_frac_pct": 0.5,
+        "abs_max_disp_pct_height": 6.03047426855989e-14,
+        "abs_max_allowed_pct": 8.0
+      }
+    },
+    "V3_edge_stretch": {
+      "pass": true,
+      "detail": {
+        "max_edge_stretch": 1.000000000000116,
+        "max_allowed": 1.5,
+        "worst_frame_t": 0.06666666766007741
+      }
     }
   },
-  "torso_vertex_count": 5958,
-  "wave_worst_frame_time": 0.5,
-  "torso_max_displacement_units": 0.032724871284998305,
-  "torso_max_displacement_pct_height": 3.2788893723671033,
-  "torso_mean_displacement_pct_height_at_worst_frame": 0.006429814839143032
+  "model_height": 0.9785161258335862,
+  "wave_summary": {
+    "waving_side": "right",
+    "resting_side": "left",
+    "arm_peak_rotation_deg": {
+      "left": 0.0,
+      "right": 119.99999846421777
+    },
+    "hand_clearance_above_shoulder_pct_height": 22.51238607945494,
+    "oscillations": 2.5
+  },
+  "overall_pass": true,
+  "failures": []
 }
