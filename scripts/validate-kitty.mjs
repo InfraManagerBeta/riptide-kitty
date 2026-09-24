@@ -9,12 +9,28 @@
  *
  *   a. >= 1 skin
  *   b. the four clips present by exact name (`walk` OR `run` accepted)
- *   c. rendered triangles <= 20,000 (summed per node instance, all scenes)
- *   d. a PBR baseColorTexture with present image data on a material used by
- *      a skinned mesh primitive
- *   e. the wave-arm check (arm rotation, oscillations, root stability,
- *      torso rotation stability, torso co-deformation via linear blend
- *      skinning)
+ *   c. rendered triangles <= 20,000 (summed per node instance, all scenes,
+ *      multiplied by EXT_mesh_gpu_instancing instance counts)
+ *   d. a PBR baseColorTexture on a material used by a skinned mesh
+ *      primitive, whose referenced image bytes are a REAL PNG/JPEG (magic
+ *      bytes + parseable header with nonzero width/height)
+ *   V1 wave arm: the waving side is chosen by IN-CLIP motion; >= 45 deg
+ *      rotation vs the wave clip's FIRST frame (never the bind pose);
+ *      the hand/wrist raised above the shoulder; >= 2 oscillations; the
+ *      other arm stays still (<= 15 deg in-clip)
+ *   V2 root/hips: EVERY root candidate (top joint, any root|hips|pelvis
+ *      joint, topmost joint with an animated translation channel) each
+ *      translates <= 5% of model height; torso rotation <= 15 deg
+ *   V3 co-deformation (LBS): over ALL vertices NOT dominated by the waving
+ *      arm chain (head, tail, legs, other arm INCLUDED) at most 0.5% may
+ *      move > 3% h from the clip's first frame and none > 8% h; plus edge
+ *      strain <= 1.5x over all-body triangles
+ *   V4 weight leakage: ZERO head/neck-dominated vertices carry > 0.2 total
+ *      arm-chain weight (either arm)
+ *   V5 loop seams: `idle` and `walk`/`run` channels end where they start
+ *      (<= 1% h translation / <= 2 deg rotation)
+ *   V6 jump: at some frame every foot joint rises >= 8% h above its
+ *      clip-start height
  *
  * Node >= 20, ESM, ZERO runtime dependencies: the GLB container, glTF JSON,
  * accessors (incl. sparse, interleaved, normalized), animation samplers
@@ -50,20 +66,30 @@ import { fileURLToPath } from 'node:url';
  */
 export const THRESHOLDS = {
   /** c. Maximum rendered triangles, summed over every primitive of every
-   *  mesh, once per node instance that references it (spec-001). */
+   *  mesh, once per node instance that references it, multiplied by the
+   *  node's EXT_mesh_gpu_instancing instance count when present (spec-001:
+   *  the budget is on RENDERED triangles). */
   MAX_TRIANGLES: 20_000,
 
-  /** e. Animation sampling rate for the wave analysis (samples per second,
-   *  over the full clip duration, correct per-sampler interpolation). */
+  /** V1/V6. Animation sampling rate (samples per second over the full clip
+   *  duration, correct per-sampler interpolation). */
   WAVE_SAMPLES_PER_SECOND: 60,
-  /** Safety cap on total wave samples (caps pathological clip durations). */
+  /** Safety cap on total samples (caps pathological clip durations). */
   WAVE_MAX_SAMPLES: 3_601,
 
-  /** e.i  Minimum peak rotation (degrees, relative to rest pose) of at least
-   *  one joint in one arm chain. */
+  /** V1. Minimum peak rotation (degrees) of at least one joint of the
+   *  waving arm chain, measured RELATIVE TO THE WAVE CLIP'S FIRST FRAME —
+   *  never the bind/rest pose (reviewer A1: on a rig whose bind pose is an
+   *  arms-up "cheer", rest-relative angles score a limp arm at 100+ deg). */
   WAVE_MIN_ARM_PEAK_DEG: 45,
 
-  /** e.ii Minimum oscillation count of the waving arm (an oscillation is a
+  /** V1. At the peak frame the waving arm's hand/wrist world height must be
+   *  >= the same arm's shoulder (or upper-arm) joint world height plus this
+   *  fraction of model height (a wave reads as a RAISED hand, not a wiggle
+   *  at the hip — reviewer A1). */
+  WAVE_HAND_ABOVE_SHOULDER_FRAC: 0.05,
+
+  /** V1. Minimum oscillation count of the waving arm (an oscillation is a
    *  full back-and-forth: two direction reversals of the dominant rotation
    *  component, or two zero-crossings about its mean). */
   WAVE_MIN_OSCILLATIONS: 2,
@@ -74,20 +100,62 @@ export const THRESHOLDS = {
    *  (rejects numeric jitter without missing small-but-real waves). */
   WAVE_OSC_MIN_SWING_FRAC: 0.2,
 
-  /** e.iii Maximum root/hips world-translation range during `wave`,
-   *  as a fraction of model height (bbox diagonal of sampled positions). */
+  /** V1. Maximum in-clip rotation (degrees vs the clip's first frame) of
+   *  ANY joint of the NON-waving arm chain — one arm waves, the other
+   *  hangs still. */
+  WAVE_MAX_OTHER_ARM_DEG: 15,
+
+  /** V2. Maximum world-translation range during `wave` of EVERY root
+   *  candidate — the skeleton's top joint, every root|hips|pelvis-named
+   *  joint, and the topmost joint with an animated translation channel —
+   *  each as a fraction of model height (reviewer A6: checking one chosen
+   *  "root" misses translation authored on `Hips` under a static `Root`). */
   WAVE_MAX_ROOT_TRANSLATION_FRAC: 0.05,
 
-  /** e.iv Maximum torso joint rotation range during `wave` (degrees,
-   *  measured as the largest angle between any sampled frame's local
-   *  rotation and the clip's first frame). */
+  /** V2. Maximum torso joint rotation during `wave` (degrees, largest angle
+   *  between any sampled frame's local rotation and the clip's first
+   *  frame). */
   WAVE_MAX_TORSO_ROTATION_DEG: 15,
 
-  /** e.v  Torso co-deformation: for vertices whose dominant skin weight is a
-   *  torso joint, the 95th-percentile of per-vertex maximum displacement
-   *  from the clip's first frame (linear blend skinning, world space) must
-   *  be <= this fraction of model height. */
-  WAVE_MAX_TORSO_P95_DISPLACEMENT_FRAC: 0.03,
+  /** V3. Soft displacement cap: fraction of model height a non-waving-arm
+   *  vertex may move (LBS, vs the clip's first frame) before it counts as
+   *  an offender. */
+  BODY_DISPLACEMENT_SOFT_FRAC: 0.03,
+  /** V3. Maximum fraction of non-waving-arm vertices that may exceed the
+   *  soft cap (reviewer A3: a p95 hides a 4% pocket of dragged vertices;
+   *  0.5% tolerates only sub-visible noise). */
+  BODY_DISPLACEMENT_MAX_OFFENDER_RATIO: 0.005,
+  /** V3. Hard displacement cap: NO non-waving-arm vertex may move more than
+   *  this fraction of model height. */
+  BODY_DISPLACEMENT_HARD_FRAC: 0.08,
+  /** V3. Maximum edge-length ratio vs the clip's first frame over triangles
+   *  whose three vertices are all non-waving-arm-dominated (catches skin
+   *  STRETCHING between a dragged pocket and its static surroundings even
+   *  when absolute displacements stay small). */
+  BODY_EDGE_STRAIN_MAX_RATIO: 1.5,
+
+  /** V4. Maximum total arm-chain weight (either arm, summed over the 4
+   *  influences) on a vertex whose DOMINANT joint is a head/neck joint.
+   *  ZERO vertices may exceed it (reviewer A2: face vertices 40% weighted
+   *  to a forearm deform visibly yet keep a head-dominant weight). */
+  HEAD_ARM_WEIGHT_MAX: 0.2,
+
+  /** V5. Loop seam: every translation channel of `idle` and `walk`/`run`
+   *  must end within this fraction of model height of its start value. */
+  LOOP_SEAM_TRANSLATION_FRAC: 0.01,
+  /** V5. Loop seam: every rotation channel must end within this many
+   *  degrees of its start value. */
+  LOOP_SEAM_ROTATION_DEG: 2,
+  /** V5 (documented extension): scale channels must end within this
+   *  relative tolerance of their start value (the order pins translation
+   *  and rotation; an unclosed scale loop pops just the same). */
+  LOOP_SEAM_SCALE_REL: 0.01,
+
+  /** V6. Minimum rise of the feet during `jump`: at some sampled frame,
+   *  EVERY foot joint's world height must be at least this fraction of
+   *  model height above that joint's clip-start height (all feet at once =
+   *  actually airborne; a single swinging foot is not a jump). */
+  JUMP_MIN_FOOT_RISE_FRAC: 0.08,
 };
 
 /**
@@ -112,18 +180,34 @@ export const THRESHOLDS = {
 export const JOINT_NAME_PATTERNS = {
   /** Arm/hand joints — seeds of the "arm chains" (descendants included). */
   arm: ['arm', 'hand', 'shoulder', 'clavicle', 'elbow', 'wrist', 'forearm', 'paw'],
+  /** Shoulder-girdle tokens. Joints matching these stay in the arm chain
+   *  for the ROTATION checks (V1) and the weight-leakage sum (V4), but are
+   *  EXCLUDED from the waving-arm set that V3 exempts from co-deformation:
+   *  chest/flank skin is routinely dominated by a Shoulder/Clavicle joint,
+   *  and exempting it hid real 7.9x strain (reviewer A3). */
+  shoulder: ['shoulder', 'clavicle'],
+  /** Hand-end tokens: used to pick the "hand/wrist" joint for the
+   *  raised-above-the-shoulder test (V1). */
+  handEnd: ['hand', 'wrist', 'paw'],
   /** Left / right side tokens (prefixes/suffixes like `L_`, `_l`, `.L`,
    *  `Left`, `mixamorig:LeftArm` all tokenize to these). */
   left: ['l', 'left'],
   right: ['r', 'right'],
-  /** Root / hips joints (fallback: the skeleton's top joint). */
+  /** Root / hips joints — ALL matches become root candidates for V2
+   *  (fallback candidate: the skeleton's top joint). */
   root: ['root', 'hips', 'pelvis'],
-  /** Torso joints for the rotation-stability check (e.iv). */
+  /** Torso joints for the rotation-stability check (V2). */
   torso: ['spine', 'chest', 'torso', 'neck', 'hips', 'pelvis'],
-  /** Head/tail joints — excluded (with descendants) from the torso
-   *  co-deformation vertex set (e.v). */
+  /** Head/neck joints (descendants included) for the weight-leakage check
+   *  (V4). NOTE: head/tail/leg vertices are NOT exempt from the V3
+   *  co-deformation set — only the waving arm chain is (reviewer A2). */
   head: ['head', 'skull', 'jaw', 'face', 'eye', 'ear'],
+  neck: ['neck'],
+  /** Tail joints (kept for documentation/extension; tail vertices are body
+   *  vertices for V3 like everything else outside the waving arm). */
   tail: ['tail'],
+  /** Foot joints for the jump check (V6), sided like arms. */
+  foot: ['foot', 'toe', 'ankle'],
 };
 
 /** Required animation clips by exact name; each inner list is "any of". */
@@ -427,9 +511,12 @@ function sideOfName(name) {
  *   joints: Set<nodeIdx>,
  *   armChains: { left: Set, right: Set, unsided: Set },  // seeds + joint descendants
  *   armAll: Set,                // union of all arm chains
- *   headTail: Set,              // head/tail matched joints + descendants
- *   torso: Set,                 // torso-name-matched joints (e.iv)
- *   rootJoint: nodeIdx | null,  // named root/hips/pelvis, else top joint
+ *   headNeck: Set,              // head/neck matched joints + descendants (V4)
+ *   torso: Set,                 // torso-name-matched joints (V2)
+ *   feet: Set,                  // foot|toe|ankle matched joints (V6)
+ *   rootNamed: Set,             // ALL joints named root|hips|pelvis (V2)
+ *   topJoint: nodeIdx | null,   // a joint whose parent is not a joint
+ *   depth: Map<nodeIdx, number> // node-tree depth of every joint
  * }
  */
 function classifyJoints(doc) {
@@ -450,9 +537,11 @@ function classifyJoints(doc) {
   };
 
   const armChains = { left: new Set(), right: new Set(), unsided: new Set() };
-  const headTail = new Set();
+  const headNeck = new Set();
   const torso = new Set();
-  let rootJoint = null;
+  const feet = new Set();
+  const rootNamed = new Set();
+  let topJoint = null;
 
   for (const j of joints) {
     const name = (doc.json.nodes[j] || {}).name || '';
@@ -460,23 +549,43 @@ function classifyJoints(doc) {
       const side = sideOfName(name) || 'unsided';
       for (const d of descendantsWithin(j)) armChains[side].add(d);
     }
-    if (matchesCategory(name, JOINT_NAME_PATTERNS.head) || matchesCategory(name, JOINT_NAME_PATTERNS.tail)) {
-      for (const d of descendantsWithin(j)) headTail.add(d);
+    if (matchesCategory(name, JOINT_NAME_PATTERNS.head) || matchesCategory(name, JOINT_NAME_PATTERNS.neck)) {
+      for (const d of descendantsWithin(j)) headNeck.add(d);
     }
     if (matchesCategory(name, JOINT_NAME_PATTERNS.torso)) torso.add(j);
-    if (rootJoint === null && matchesCategory(name, JOINT_NAME_PATTERNS.root)) rootJoint = j;
+    if (matchesCategory(name, JOINT_NAME_PATTERNS.foot)) feet.add(j);
+    if (matchesCategory(name, JOINT_NAME_PATTERNS.root)) rootNamed.add(j);
   }
 
-  if (rootJoint === null) {
-    // Fallback: the skeleton's top joint — a joint whose parent is not a joint.
-    for (const j of joints) {
-      const p = parents.get(j);
-      if (p === undefined || !joints.has(p)) { rootJoint = j; break; }
-    }
+  // The skeleton's top joint — a joint whose parent is not a joint.
+  for (const j of joints) {
+    const p = parents.get(j);
+    if (p === undefined || !joints.has(p)) { topJoint = j; break; }
+  }
+
+  // Node-tree depth of every joint (for "topmost"/"deepest" selection).
+  const depth = new Map();
+  for (const j of joints) {
+    let d = 0, n = j;
+    while (parents.get(n) !== undefined) { n = parents.get(n); d++; }
+    depth.set(j, d);
   }
 
   const armAll = new Set([...armChains.left, ...armChains.right, ...armChains.unsided]);
-  return { joints, armChains, armAll, headTail, torso, rootJoint };
+  return { joints, armChains, armAll, headNeck, torso, feet, rootNamed, topJoint, depth };
+}
+
+/**
+ * The joints V3 exempts from the co-deformation set: the WAVING arm chain
+ * minus its shoulder/clavicle-named joints (see JOINT_NAME_PATTERNS.shoulder
+ * — shoulder-dominated chest/flank skin must stay accountable).
+ */
+function wavingArmCoreSet(doc, chain) {
+  const core = new Set();
+  for (const j of chain) {
+    if (!matchesCategory(doc.nodeName(j), JOINT_NAME_PATTERNS.shoulder)) core.add(j);
+  }
+  return core;
 }
 
 /* ========================================================================== *
@@ -648,6 +757,25 @@ function primitiveTriangles(doc, prim) {
   return 0;
 }
 
+/**
+ * EXT_mesh_gpu_instancing: a node carrying the extension renders its mesh
+ * once per instance — the instance count is the count of any of the
+ * extension's attribute accessors (they must agree; the max is taken
+ * defensively). A node without the extension renders once. (Reviewer A4:
+ * an instanced node doubles the RENDERED triangles while the plain sum
+ * still reports the single-copy count.)
+ */
+function nodeInstanceCount(doc, node) {
+  const ext = node?.extensions?.EXT_mesh_gpu_instancing;
+  if (!ext || !ext.attributes) return 1;
+  let count = 0;
+  for (const acc of Object.values(ext.attributes)) {
+    const a = (doc.json.accessors || [])[acc];
+    if (a && a.count > count) count = a.count;
+  }
+  return count > 0 ? count : 1;
+}
+
 function countTriangles(doc) {
   const rendered = renderedNodeSet(doc);
   let total = 0;
@@ -658,8 +786,10 @@ function countTriangles(doc) {
     const mesh = doc.json.meshes[node.mesh];
     let t = 0;
     for (const prim of mesh.primitives || []) t += primitiveTriangles(doc, prim);
+    const instances = nodeInstanceCount(doc, node);
+    t *= instances;
     total += t;
-    perMesh.push({ node: doc.nodeName(n), mesh: mesh.name || `mesh#${node.mesh}`, triangles: t });
+    perMesh.push({ node: doc.nodeName(n), mesh: mesh.name || `mesh#${node.mesh}`, triangles: t, instances });
   }
   return { total, perMesh };
 }
@@ -756,33 +886,92 @@ function checkTriangles(docs) {
   const rows = docs.map(d => ({ file: d.label, ...countTriangles(d) }));
   const worst = Math.max(...rows.map(r => r.total));
   const pass = worst <= THRESHOLDS.MAX_TRIANGLES;
+  const instancedNote = rows.some(r => r.perMesh.some(m => m.instances > 1))
+    ? '; EXT_mesh_gpu_instancing multiplied in: ' + rows.flatMap(r => r.perMesh.filter(m => m.instances > 1)
+        .map(m => `${r.file}:${m.node} x${m.instances}`)).join(', ')
+    : '';
   return {
     id: 'triangles',
     title: `rendered triangles <= ${THRESHOLDS.MAX_TRIANGLES}`,
     pass,
     measured: rows.map(r => `${r.file}: ${r.total}`).join('; ') +
-      ` (limit ${THRESHOLDS.MAX_TRIANGLES}; per node instance, all scenes, morph targets add none)`,
+      ` (limit ${THRESHOLDS.MAX_TRIANGLES}; per node instance, all scenes, x gpu-instancing count, morph targets add none)` +
+      instancedNote,
     details: { rows, worst },
   };
 }
 
-function imageDataPresent(doc, imageIdx) {
+/**
+ * Sniff image bytes: valid PNG (8-byte magic + IHDR width/height) or JPEG
+ * (SOI + a SOFn frame header) with nonzero dimensions. The declared
+ * mimeType is deliberately ignored — only the actual bytes count
+ * (reviewer A5: a zeroed payload with an intact JSON reference must FAIL).
+ * Returns { format, width, height } or null.
+ */
+export function sniffImage(bytes) {
+  if (!bytes || bytes.length < 4) return null;
+  // PNG: 89 50 4E 47 0D 0A 1A 0A, then the IHDR chunk (must be first).
+  const PNG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+  if (bytes.length >= 33 && PNG.every((b, i) => bytes[i] === b)) {
+    const type = String.fromCharCode(bytes[12], bytes[13], bytes[14], bytes[15]);
+    if (type !== 'IHDR') return null;
+    const be32 = o => (bytes[o] << 24 | bytes[o + 1] << 16 | bytes[o + 2] << 8 | bytes[o + 3]) >>> 0;
+    const width = be32(16), height = be32(20);
+    return width > 0 && height > 0 ? { format: 'PNG', width, height } : null;
+  }
+  // JPEG: FF D8, then scan markers for SOF0..15 (except DHT C4 / JPG C8 / DAC CC).
+  if (bytes[0] === 0xff && bytes[1] === 0xd8) {
+    let i = 2;
+    while (i + 9 < bytes.length) {
+      if (bytes[i] !== 0xff) return null; // marker desync -> not parseable
+      let m = bytes[i + 1];
+      while (m === 0xff && i + 2 < bytes.length) { i++; m = bytes[i + 1]; } // fill bytes
+      if (m >= 0xc0 && m <= 0xcf && m !== 0xc4 && m !== 0xc8 && m !== 0xcc) {
+        const height = (bytes[i + 5] << 8) | bytes[i + 6];
+        const width = (bytes[i + 7] << 8) | bytes[i + 8];
+        return width > 0 && height > 0 ? { format: 'JPEG', width, height } : null;
+      }
+      if (m === 0xd8 || (m >= 0xd0 && m <= 0xd7) || m === 0x01) { i += 2; continue; } // standalone
+      if (m === 0xd9 || m === 0xda) return null; // EOI/SOS before any SOF
+      const segLen = (bytes[i + 2] << 8) | bytes[i + 3];
+      if (segLen < 2) return null;
+      i += 2 + segLen;
+    }
+  }
+  return null;
+}
+
+/** Load the actual bytes of image `imageIdx` (bufferView / data: URI / file). */
+function loadImageBytes(doc, imageIdx) {
   const img = (doc.json.images || [])[imageIdx];
-  if (!img) return { present: false, why: `image ${imageIdx} missing` };
+  if (!img) return { bytes: null, why: `image ${imageIdx} missing` };
   if (img.bufferView !== undefined) {
     try {
       const bv = doc.json.bufferViews[img.bufferView];
-      doc.buffer(bv.buffer);
-      return { present: (bv.byteLength || 0) > 0, why: `embedded bufferView ${img.bufferView} (${bv.byteLength} bytes)` };
-    } catch (e) { return { present: false, why: String(e.message) }; }
+      const buf = doc.buffer(bv.buffer);
+      const off = bv.byteOffset || 0;
+      return {
+        bytes: buf.subarray(off, off + (bv.byteLength || 0)),
+        why: `embedded bufferView ${img.bufferView} (${bv.byteLength} bytes)`,
+      };
+    } catch (e) { return { bytes: null, why: String(e.message) }; }
   }
   if (img.uri !== undefined) {
-    if (img.uri.startsWith('data:')) return { present: true, why: 'data: URI' };
-    if (!doc.baseDir) return { present: false, why: `external uri "${img.uri}" not resolvable from memory` };
+    if (img.uri.startsWith('data:')) {
+      const comma = img.uri.indexOf(',');
+      const meta = img.uri.slice(5, comma);
+      const data = img.uri.slice(comma + 1);
+      const bytes = meta.endsWith(';base64')
+        ? Uint8Array.from(Buffer.from(data, 'base64'))
+        : new TextEncoder().encode(decodeURIComponent(data));
+      return { bytes, why: `data: URI (${bytes.length} bytes)` };
+    }
+    if (!doc.baseDir) return { bytes: null, why: `external uri "${img.uri}" not resolvable from memory` };
     const p = path.resolve(doc.baseDir, decodeURIComponent(img.uri));
-    return { present: fs.existsSync(p), why: `uri "${img.uri}"${fs.existsSync(p) ? '' : ' NOT FOUND'}` };
+    if (!fs.existsSync(p)) return { bytes: null, why: `uri "${img.uri}" NOT FOUND` };
+    return { bytes: new Uint8Array(fs.readFileSync(p)), why: `uri "${img.uri}"` };
   }
-  return { present: false, why: 'image has neither bufferView nor uri' };
+  return { bytes: null, why: 'image has neither bufferView nor uri' };
 }
 
 function checkBaseColorTexture(docs) {
@@ -802,13 +991,17 @@ function checkBaseColorTexture(docs) {
         const tex = (doc.json.textures || [])[bct.index];
         const source = tex?.source ?? tex?.extensions?.KHR_texture_basisu?.source;
         if (source === undefined) { detail = `texture ${bct.index} has no image source`; continue; }
-        const imgCheck = imageDataPresent(doc, source);
-        if (imgCheck.present) {
-          ok = true;
-          detail = `material "${mat.name || prim.material}" on skinned node "${doc.nodeName(n)}" -> ${imgCheck.why}`;
-          break;
+        const loaded = loadImageBytes(doc, source);
+        if (!loaded.bytes) { detail = `image data missing: ${loaded.why}`; continue; }
+        const sniffed = sniffImage(loaded.bytes);
+        if (!sniffed) {
+          detail = `image bytes are NOT a valid PNG/JPEG (magic/header check failed): ${loaded.why}`;
+          continue;
         }
-        detail = `image data missing: ${imgCheck.why}`;
+        ok = true;
+        detail = `material "${mat.name || prim.material}" on skinned node "${doc.nodeName(n)}" -> ` +
+          `${loaded.why} = valid ${sniffed.format} ${sniffed.width}x${sniffed.height}`;
+        break;
       }
       if (ok) break;
     }
@@ -817,7 +1010,7 @@ function checkBaseColorTexture(docs) {
   }
   return {
     id: 'baseColorTexture',
-    title: 'PBR baseColorTexture with present image data on a skinned mesh material',
+    title: 'PBR baseColorTexture on a skinned mesh material, image bytes = valid PNG/JPEG',
     pass,
     measured: rows.map(r => `${r.file}: ${r.ok ? 'yes' : 'NO'} — ${r.detail}`).join('; '),
     details: { rows },
@@ -865,33 +1058,47 @@ function countOscillations(signal) {
   };
 }
 
-function percentile(sortedAsc, p) {
-  if (!sortedAsc.length) return 0;
-  const idx = Math.min(sortedAsc.length - 1, Math.floor(p * (sortedAsc.length - 1) + 0.5));
-  return sortedAsc[idx];
+/** Shared: locate the doc + clip for a canonical name (list of accepted names). */
+function findClip(docs, names) {
+  for (const d of docs) {
+    for (const a of d.json.animations || []) {
+      if (names.includes(a.name)) return { doc: d, anim: a, clipName: a.name };
+    }
+  }
+  return null;
+}
+
+/** Sample times for a clip: WAVE_SAMPLES_PER_SECOND, >= 2, capped. */
+function sampleTimes(duration) {
+  const n = Math.min(
+    THRESHOLDS.WAVE_MAX_SAMPLES,
+    Math.max(2, Math.ceil(duration * THRESHOLDS.WAVE_SAMPLES_PER_SECOND) + 1),
+  );
+  return Array.from({ length: n }, (_, i) => (i / (n - 1)) * duration);
 }
 
 /**
- * The wave-arm check (e). See THRESHOLDS for every limit. Sampling:
+ * The wave check — V1 (arm), V2 (root/torso stability), V3 (co-deformation
+ * + edge strain). See THRESHOLDS for every limit. Sampling:
  * WAVE_SAMPLES_PER_SECOND over the clip duration (>= 2 samples, capped at
  * WAVE_MAX_SAMPLES), with per-sampler STEP/LINEAR/CUBICSPLINE interpolation.
+ *
+ * ALL rotation measurements are relative to the WAVE CLIP'S FIRST FRAME,
+ * never the bind/rest pose (reviewer A1: this rig's bind pose is an arms-up
+ * "cheer", so rest-relative angles score a limp arm at 121.7 deg and a
+ * STATIC arm at 78 deg — and picking the waving side by rest-relative peak
+ * scores the wrong arm).
  */
 function checkWaveArm(docs) {
   const sub = {};
   const fail = (msg) => ({
-    id: 'waveArm', title: 'wave-arm check (rotation, oscillation, stability, co-deformation)',
+    id: 'waveArm', title: 'wave check V1-V3 (arm, oscillation, stability, co-deformation, strain)',
     pass: false, measured: msg, details: { subChecks: sub, error: msg },
   });
 
-  // Locate the doc + clip named "wave".
-  let doc = null, anim = null;
-  for (const d of docs) {
-    for (const a of d.json.animations || []) {
-      if (a.name === 'wave') { doc = d; anim = a; break; }
-    }
-    if (doc) break;
-  }
-  if (!doc) return fail('no animation named "wave" found in any file');
+  const hit = findClip(docs, ['wave']);
+  if (!hit) return fail('no animation named "wave" found in any file');
+  const { doc, anim } = hit;
 
   const cls = classifyJoints(doc);
   if (!cls.joints.size) return fail('no skin joints in the file carrying "wave"');
@@ -899,119 +1106,200 @@ function checkWaveArm(docs) {
   const height = modelHeight(doc);
   if (!(height > 0)) return fail('model height is zero — cannot scale thresholds');
 
-  const chains = Object.entries(cls.armChains).filter(([, s]) => s.size > 0);
-  if (!chains.length) {
+  const sidedChains = ['left', 'right', 'unsided']
+    .map(side => [side, cls.armChains[side]])
+    .filter(([, s]) => s.size > 0);
+  if (!sidedChains.length) {
     return fail(`no arm joints matched JOINT_NAME_PATTERNS.arm among skin joints: [${jointNames.join(', ')}]`);
   }
 
   const pose = buildPoseSampler(doc, anim);
   if (!(pose.duration > 0)) return fail('"wave" clip has zero duration');
-  const nSamples = Math.min(
-    THRESHOLDS.WAVE_MAX_SAMPLES,
-    Math.max(2, Math.ceil(pose.duration * THRESHOLDS.WAVE_SAMPLES_PER_SECOND) + 1),
-  );
-  const times = Array.from({ length: nSamples }, (_, i) => (i / (nSamples - 1)) * pose.duration);
+  const times = sampleTimes(pose.duration);
+  const nSamples = times.length;
 
-  // Per-frame local rotations for every joint; rotation vectors relative to
-  // rest pose AND relative to the clip's first frame, with quaternion
-  // double-cover continuity (flip to keep dot >= 0 with previous sample).
+  // Per-frame local rotations for every joint, as rotation vectors relative
+  // to the CLIP'S FIRST FRAME, with quaternion double-cover continuity.
   const jointList = [...cls.joints];
-  const relRestVec = new Map(); // j -> Array<[x,y,z]> (radians)
-  const relStartVec = new Map();
+  const relStartVec = new Map(); // j -> Array<[x,y,z]> (radians)
   {
-    const prevRest = new Map(), prevStart = new Map();
+    const prevStart = new Map();
     const startRot = new Map();
-    for (const j of jointList) { relRestVec.set(j, []); relStartVec.set(j, []); }
+    for (const j of jointList) relStartVec.set(j, []);
     for (let f = 0; f < nSamples; f++) {
       for (const j of jointList) {
-        const l = pose.localTRS(j, times[f]);
-        const q = l.r;
+        const q = pose.localTRS(j, times[f]).r;
         if (f === 0) startRot.set(j, q);
-        let qr = quatMul(quatConj(pose.rest[j].r), q);
         let qs = quatMul(quatConj(startRot.get(j)), q);
-        const pr = prevRest.get(j), ps = prevStart.get(j);
-        if (pr && quatDot(qr, pr) < 0) qr = qr.map(v => -v);
+        const ps = prevStart.get(j);
         if (ps && quatDot(qs, ps) < 0) qs = qs.map(v => -v);
-        prevRest.set(j, qr); prevStart.set(j, qs);
-        relRestVec.get(j).push(quatToRotVec(qr));
+        prevStart.set(j, qs);
         relStartVec.get(j).push(quatToRotVec(qs));
       }
     }
   }
   const angleDeg = v => Math.hypot(v[0], v[1], v[2]) * DEG;
-
-  // (i) peak arm rotation from rest, per chain.
-  let best = null; // { side, joint, name, peakRestDeg, peakStartDeg }
-  const chainStats = [];
-  for (const [side, set] of chains) {
-    let chainBest = null;
+  const chainPeak = set => {
+    let best = null;
     for (const j of set) {
-      const peakRest = Math.max(...relRestVec.get(j).map(angleDeg));
-      const peakStart = Math.max(...relStartVec.get(j).map(angleDeg));
-      if (!chainBest || peakRest > chainBest.peakRestDeg) {
-        chainBest = { side, joint: j, name: doc.nodeName(j), peakRestDeg: peakRest, peakStartDeg: peakStart };
-      }
+      const peak = Math.max(...relStartVec.get(j).map(angleDeg));
+      if (!best || peak > best.peakStartDeg) best = { joint: j, name: doc.nodeName(j), peakStartDeg: peak };
     }
-    chainStats.push(chainBest);
-    if (!best || chainBest.peakRestDeg > best.peakRestDeg) best = chainBest;
-  }
-  sub.armRotation = {
-    pass: best.peakRestDeg >= THRESHOLDS.WAVE_MIN_ARM_PEAK_DEG,
-    measured: `${best.side} arm, joint "${best.name}": peak ${best.peakRestDeg.toFixed(1)} deg from rest ` +
-      `(${best.peakStartDeg.toFixed(1)} deg from clip start); threshold >= ${THRESHOLDS.WAVE_MIN_ARM_PEAK_DEG} deg`,
-    peakRestDeg: best.peakRestDeg, peakStartDeg: best.peakStartDeg,
-    arm: best.side, joint: best.name,
-    perChain: chainStats.map(c => ({ side: c.side, joint: c.name, peakRestDeg: +c.peakRestDeg.toFixed(2) })),
+    return best;
   };
 
-  // (ii) oscillations of the winning arm chain: best count over its joints
-  // and over each rotation-vector component (x/y/z, degrees), measured
-  // relative to the clip start (captures the wave-back-and-forth even when
-  // the raise itself is a one-way move).
+  // --- V1: pick the waving side by IN-CLIP motion (peak rotation vs the
+  // clip's first frame, over each chain's joints).
+  const chainStats = sidedChains.map(([side, set]) => ({ side, ...chainPeak(set) }));
+  chainStats.sort((a, b) => b.peakStartDeg - a.peakStartDeg);
+  const best = chainStats[0];
   const winningChain = cls.armChains[best.side];
-  let osc = { oscillations: 0, halfSwings: 0, crossings: 0 }, oscJoint = best.name, oscAxis = 'x';
-  for (const j of winningChain) {
-    const vecs = relStartVec.get(j);
-    for (let axis = 0; axis < 3; axis++) {
-      const sig = vecs.map(v => v[axis] * DEG);
-      const c = countOscillations(sig);
-      if (c.oscillations > osc.oscillations) {
-        osc = c; oscJoint = doc.nodeName(j); oscAxis = 'xyz'[axis];
-      }
-    }
-  }
-  sub.oscillations = {
-    pass: osc.oscillations >= THRESHOLDS.WAVE_MIN_OSCILLATIONS,
-    measured: `${osc.oscillations} oscillation(s) on joint "${oscJoint}" axis ${oscAxis} ` +
-      `(${osc.halfSwings} half-swings, ${osc.crossings} mean-crossings); threshold >= ${THRESHOLDS.WAVE_MIN_OSCILLATIONS}`,
-    oscillations: osc.oscillations, halfSwings: osc.halfSwings, crossings: osc.crossings,
-    joint: oscJoint, axis: oscAxis,
+
+  sub.armRotation = {
+    pass: best.peakStartDeg >= THRESHOLDS.WAVE_MIN_ARM_PEAK_DEG,
+    measured: `${best.side} arm (side chosen by in-clip motion), joint "${best.name}": ` +
+      `peak ${best.peakStartDeg.toFixed(1)} deg from the clip's first frame; ` +
+      `threshold >= ${THRESHOLDS.WAVE_MIN_ARM_PEAK_DEG} deg`,
+    peakStartDeg: best.peakStartDeg, arm: best.side, joint: best.name,
+    perChain: chainStats.map(c => ({ side: c.side, joint: c.name, peakStartDeg: +c.peakStartDeg.toFixed(2) })),
   };
 
-  // Per-frame global matrices (needed by iii and v).
+  // Per-frame global matrices (V1 hand height, V2, V3).
   const globalsPerFrame = times.map(t => pose.globalsAt(t));
+  const worldPos = (f, j) => {
+    const m = globalsPerFrame[f][j];
+    return [m[12], m[13], m[14]];
+  };
 
-  // (iii) root/hips world-translation range (bbox diagonal of sampled root
-  // positions) <= 5% of model height.
+  // --- V1: at the peak frame the hand/wrist must be raised above the
+  // shoulder (or upper-arm) joint by >= 5% of model height. "Peak frame" =
+  // the frame maximizing (handY - shoulderY).
   {
-    const j = cls.rootJoint;
-    const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
-    for (const g of globalsPerFrame) {
-      const m = g[j];
-      const p = [m[12], m[13], m[14]];
-      for (let c = 0; c < 3; c++) { if (p[c] < lo[c]) lo[c] = p[c]; if (p[c] > hi[c]) hi[c] = p[c]; }
+    const deepest = (set, filterCat) => {
+      let bestJ = null, bestD = -1;
+      for (const j of set) {
+        if (filterCat && !matchesCategory(doc.nodeName(j), filterCat)) continue;
+        const d = cls.depth.get(j) || 0;
+        if (d > bestD) { bestD = d; bestJ = j; }
+      }
+      return bestJ;
+    };
+    const topmost = (set, filterCat) => {
+      let bestJ = null, bestD = Infinity;
+      for (const j of set) {
+        if (filterCat && !matchesCategory(doc.nodeName(j), filterCat)) continue;
+        const d = cls.depth.get(j) || 0;
+        if (d < bestD) { bestD = d; bestJ = j; }
+      }
+      return bestJ;
+    };
+    const hand = deepest(winningChain, JOINT_NAME_PATTERNS.handEnd) ?? deepest(winningChain, null);
+    const shoulder = topmost(winningChain, JOINT_NAME_PATTERNS.shoulder) ?? topmost(winningChain, null);
+    let peak = { margin: -Infinity, f: 0, handY: 0, shoulderY: 0 };
+    for (let f = 0; f < nSamples; f++) {
+      const hy = worldPos(f, hand)[1];
+      const sy = worldPos(f, shoulder)[1];
+      if (hy - sy > peak.margin) peak = { margin: hy - sy, f, handY: hy, shoulderY: sy };
     }
-    const range = Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]);
-    const frac = range / height;
-    sub.rootTranslation = {
-      pass: frac <= THRESHOLDS.WAVE_MAX_ROOT_TRANSLATION_FRAC,
-      measured: `root joint "${doc.nodeName(j)}" translation range ${range.toFixed(4)} units = ` +
-        `${(frac * 100).toFixed(2)}% of model height ${height.toFixed(3)}; threshold <= ${THRESHOLDS.WAVE_MAX_ROOT_TRANSLATION_FRAC * 100}%`,
-      rangeUnits: range, rangeFrac: frac, rootJoint: doc.nodeName(j), modelHeight: height,
+    const need = THRESHOLDS.WAVE_HAND_ABOVE_SHOULDER_FRAC * height;
+    sub.handAboveShoulder = {
+      pass: peak.margin >= need,
+      measured: `hand "${doc.nodeName(hand)}" vs shoulder "${doc.nodeName(shoulder)}": best margin ` +
+        `${peak.margin.toFixed(4)} units (${(peak.margin / height * 100).toFixed(1)}% h) at t=${times[peak.f].toFixed(2)}s ` +
+        `(hand y ${peak.handY.toFixed(3)}, shoulder y ${peak.shoulderY.toFixed(3)}); ` +
+        `threshold >= +${THRESHOLDS.WAVE_HAND_ABOVE_SHOULDER_FRAC * 100}% h`,
+      marginUnits: peak.margin, marginFrac: peak.margin / height,
+      handJoint: doc.nodeName(hand), shoulderJoint: doc.nodeName(shoulder), peakTime: times[peak.f],
     };
   }
 
-  // (iv) torso joints' local rotation range (max angle vs the clip's first
+  // --- V1: oscillations of the winning arm chain: best count over its
+  // joints and over each rotation-vector component, vs the clip start.
+  {
+    let osc = { oscillations: 0, halfSwings: 0, crossings: 0 }, oscJoint = best.name, oscAxis = 'x';
+    for (const j of winningChain) {
+      const vecs = relStartVec.get(j);
+      for (let axis = 0; axis < 3; axis++) {
+        const sig = vecs.map(v => v[axis] * DEG);
+        const c = countOscillations(sig);
+        if (c.oscillations > osc.oscillations) {
+          osc = c; oscJoint = doc.nodeName(j); oscAxis = 'xyz'[axis];
+        }
+      }
+    }
+    sub.oscillations = {
+      pass: osc.oscillations >= THRESHOLDS.WAVE_MIN_OSCILLATIONS,
+      measured: `${osc.oscillations} oscillation(s) on joint "${oscJoint}" axis ${oscAxis} ` +
+        `(${osc.halfSwings} half-swings, ${osc.crossings} mean-crossings); threshold >= ${THRESHOLDS.WAVE_MIN_OSCILLATIONS}`,
+      oscillations: osc.oscillations, halfSwings: osc.halfSwings, crossings: osc.crossings,
+      joint: oscJoint, axis: oscAxis,
+    };
+  }
+
+  // --- V1: the OTHER arm chain must stay still (<= 15 deg in-clip).
+  {
+    const others = chainStats.slice(1);
+    if (!others.length) {
+      sub.otherArmStill = {
+        pass: true,
+        measured: 'only one arm chain found — nothing to hold still (pattern list may need extending)',
+        maxDeg: 0,
+      };
+    } else {
+      const worst = others.reduce((a, b) => (b.peakStartDeg > a.peakStartDeg ? b : a));
+      sub.otherArmStill = {
+        pass: worst.peakStartDeg <= THRESHOLDS.WAVE_MAX_OTHER_ARM_DEG,
+        measured: `non-waving arm (${others.map(o => o.side).join('/')}): max in-clip rotation ` +
+          `${worst.peakStartDeg.toFixed(1)} deg on "${worst.name}"; threshold <= ${THRESHOLDS.WAVE_MAX_OTHER_ARM_DEG} deg`,
+        maxDeg: worst.peakStartDeg, joint: worst.name, side: worst.side,
+      };
+    }
+  }
+
+  // --- V2: EVERY root candidate must stay put: the top joint, every
+  // root|hips|pelvis-named joint, and the topmost joint that actually has an
+  // animated translation channel in this clip (reviewer A6: translation
+  // authored on `Hips` under a never-animated `Root` must not hide).
+  {
+    const candidates = new Map(); // j -> Set<label>
+    const addCand = (j, label) => {
+      if (j === undefined || j === null) return;
+      if (!candidates.has(j)) candidates.set(j, new Set());
+      candidates.get(j).add(label);
+    };
+    addCand(cls.topJoint, 'top joint');
+    for (const j of cls.rootNamed) addCand(j, 'root-named');
+    let topAnim = null;
+    for (const [nodeIdx, tr] of pose.tracks) {
+      if (!tr.translation || !cls.joints.has(nodeIdx)) continue;
+      const d = cls.depth.get(nodeIdx) || 0;
+      if (!topAnim || d < topAnim.d) topAnim = { j: nodeIdx, d };
+    }
+    if (topAnim) addCand(topAnim.j, 'topmost animated translation');
+
+    const rows = [];
+    let worst = null;
+    for (const [j, labels] of candidates) {
+      const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+      for (let f = 0; f < nSamples; f++) {
+        const p = worldPos(f, j);
+        for (let c = 0; c < 3; c++) { if (p[c] < lo[c]) lo[c] = p[c]; if (p[c] > hi[c]) hi[c] = p[c]; }
+      }
+      const range = Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]);
+      const frac = range / height;
+      const row = { joint: doc.nodeName(j), roles: [...labels].join('+'), rangeUnits: range, rangeFrac: frac };
+      rows.push(row);
+      if (!worst || frac > worst.rangeFrac) worst = row;
+    }
+    sub.rootTranslation = {
+      pass: rows.every(r => r.rangeFrac <= THRESHOLDS.WAVE_MAX_ROOT_TRANSLATION_FRAC),
+      measured: rows.map(r => `"${r.joint}" (${r.roles}): ${(r.rangeFrac * 100).toFixed(2)}% h`).join('; ') +
+        `; threshold each <= ${THRESHOLDS.WAVE_MAX_ROOT_TRANSLATION_FRAC * 100}% of model height ${height.toFixed(3)}`,
+      candidates: rows, rangeFrac: worst ? worst.rangeFrac : 0, modelHeight: height,
+    };
+  }
+
+  // --- V2: torso joints' local rotation (max angle vs the clip's first
   // frame) <= 15 deg.
   {
     let worst = { deg: -1, name: '(none)' };
@@ -1030,13 +1318,24 @@ function checkWaveArm(docs) {
     };
   }
 
-  // (v) torso co-deformation via linear blend skinning.
+  // --- V3: co-deformation via linear blend skinning, over ALL vertices NOT
+  // dominated by the waving arm chain (head, tail, legs, the other arm
+  // INCLUDED — reviewer A2/A3: excluding head-dominated vertices or judging
+  // by p95 let visibly dragged faces and torso pockets pass). Shoulder/
+  // clavicle joints do NOT count as "waving arm" here (see
+  // wavingArmCoreSet). Plus edge strain over all-body triangles.
   {
-    // world-space v(t) = sum_i w_i * G_joint(t) * IBM_i * v  (glTF skinning)
-    let torsoVertexCount = 0;
-    const perVertexMax = [];
+    const wavingCore = wavingArmCoreSet(doc, winningChain);
+    let bodyVertexCount = 0;
+    let over3Count = 0;
+    let maxDisp = { units: 0, frac: 0, node: null, vert: -1 };
+    let strain = { maxRatio: 1, node: null, baseLen: 0 };
+    let over3Example = null;
     let skinnedPrims = 0;
+    let bodyEdgeCount = 0, bodyTriCount = 0;
+    const soft = THRESHOLDS.BODY_DISPLACEMENT_SOFT_FRAC * height;
     const rendered = renderedNodeSet(doc);
+
     for (const n of rendered) {
       const node = doc.json.nodes[n];
       if (!node || node.mesh === undefined || node.skin === undefined) continue;
@@ -1047,12 +1346,11 @@ function checkWaveArm(docs) {
         if (!ibmAcc) return mat4Identity();
         return Array.from(ibmAcc.data.slice(k * 16, k * 16 + 16));
       });
-      // Precompute per frame: jointMat[k] = G[joint k] * IBM[k]
+      // Per frame: jointMat[k] = G[joint k] * IBM[k]
       const jointMats = globalsPerFrame.map(g => jointsArr.map((j, k) => mat4Mul(g[j], ibm[k])));
-
-      const isTorsoDominant = k => {
+      const isBodyJoint = k => {
         const j = jointsArr[k];
-        return j !== undefined && !cls.armAll.has(j) && !cls.headTail.has(j);
+        return j !== undefined && !wavingCore.has(j);
       };
 
       for (const prim of doc.json.meshes[node.mesh].primitives || []) {
@@ -1062,63 +1360,327 @@ function checkWaveArm(docs) {
         const pos = doc.accessor(at.POSITION);
         const jnt = doc.accessor(at.JOINTS_0);
         const wgt = doc.accessor(at.WEIGHTS_0);
-        for (let v = 0; v < pos.count; v++) {
-          // dominant joint
+        const nv = pos.count;
+
+        // Body vertices: dominant joint not in the waving arm core.
+        const isBody = new Uint8Array(nv);
+        for (let v = 0; v < nv; v++) {
           let domK = -1, domW = -1;
           for (let c = 0; c < 4; c++) {
             const w = wgt.data[v * 4 + c];
             if (w > domW) { domW = w; domK = jnt.data[v * 4 + c]; }
           }
-          if (domW <= 0 || !isTorsoDominant(domK)) continue;
-          torsoVertexCount++;
-          const p = [pos.data[v * 3], pos.data[v * 3 + 1], pos.data[v * 3 + 2]];
-          let first = null, maxD = 0;
-          for (let f = 0; f < nSamples; f++) {
-            const jm = jointMats[f];
+          if (domW > 0 && isBodyJoint(domK)) { isBody[v] = 1; bodyVertexCount++; }
+        }
+
+        // Triangles (for edge strain): only triangles whose three vertices
+        // are ALL body vertices contribute edges.
+        const edges = new Map(); // key a*nv+b (a<b) -> baseLen (filled at f=0)
+        {
+          const idx = prim.indices !== undefined ? doc.accessor(prim.indices).data : null;
+          const count = idx ? idx.length : nv;
+          const mode = prim.mode === undefined ? 4 : prim.mode;
+          const vtx = i => (idx ? idx[i] : i);
+          const pushTri = (a, b, c) => {
+            if (!(isBody[a] && isBody[b] && isBody[c])) return;
+            bodyTriCount++;
+            for (const [p, q] of [[a, b], [b, c], [a, c]]) {
+              const key = p < q ? p * nv + q : q * nv + p;
+              if (!edges.has(key)) edges.set(key, 0);
+            }
+          };
+          if (mode === 4) {
+            for (let i = 0; i + 2 < count; i += 3) pushTri(vtx(i), vtx(i + 1), vtx(i + 2));
+          } else if (mode === 5) {
+            for (let i = 0; i + 2 < count; i++) pushTri(vtx(i), vtx(i + 1), vtx(i + 2));
+          } else if (mode === 6) {
+            for (let i = 1; i + 1 < count; i++) pushTri(vtx(0), vtx(i), vtx(i + 1));
+          }
+          bodyEdgeCount += edges.size;
+        }
+
+        // Frame loop: skinned positions of body vertices; track per-vertex
+        // max displacement from frame 0 and per-edge max length ratio.
+        const base = new Float64Array(nv * 3);
+        const cur = new Float64Array(nv * 3);
+        const maxD = new Float64Array(nv);
+        for (let f = 0; f < nSamples; f++) {
+          const jm = jointMats[f];
+          for (let v = 0; v < nv; v++) {
+            if (!isBody[v]) continue;
+            const p = [pos.data[v * 3], pos.data[v * 3 + 1], pos.data[v * 3 + 2]];
             let ox = 0, oy = 0, oz = 0;
             for (let c = 0; c < 4; c++) {
               const w = wgt.data[v * 4 + c];
               if (w === 0) continue;
-              const k = jnt.data[v * 4 + c];
-              const q = mat4TransformPoint(jm[k], p);
+              const q = mat4TransformPoint(jm[jnt.data[v * 4 + c]], p);
               ox += w * q[0]; oy += w * q[1]; oz += w * q[2];
             }
-            if (f === 0) first = [ox, oy, oz];
-            else {
-              const d = Math.hypot(ox - first[0], oy - first[1], oz - first[2]);
-              if (d > maxD) maxD = d;
+            cur[v * 3] = ox; cur[v * 3 + 1] = oy; cur[v * 3 + 2] = oz;
+            if (f === 0) {
+              base[v * 3] = ox; base[v * 3 + 1] = oy; base[v * 3 + 2] = oz;
+            } else {
+              const d = Math.hypot(ox - base[v * 3], oy - base[v * 3 + 1], oz - base[v * 3 + 2]);
+              if (d > maxD[v]) maxD[v] = d;
+              if (d > maxDisp.units) maxDisp = { units: d, frac: d / height, node: doc.nodeName(n), vert: v };
             }
           }
-          perVertexMax.push(maxD);
+          for (const [key, baseLen] of edges) {
+            const a = Math.floor(key / nv), b = key % nv;
+            const len = Math.hypot(
+              cur[a * 3] - cur[b * 3], cur[a * 3 + 1] - cur[b * 3 + 1], cur[a * 3 + 2] - cur[b * 3 + 2]);
+            if (f === 0) edges.set(key, len);
+            else if (baseLen > 1e-9) {
+              const ratio = len / baseLen;
+              if (ratio > strain.maxRatio) strain = { maxRatio: ratio, node: doc.nodeName(n), baseLen };
+            }
+          }
+        }
+        for (let v = 0; v < nv; v++) {
+          if (isBody[v] && maxD[v] > soft) {
+            over3Count++;
+            if (!over3Example || maxD[v] > over3Example.units) {
+              over3Example = { units: maxD[v], frac: maxD[v] / height, node: doc.nodeName(n), vert: v };
+            }
+          }
         }
       }
     }
+
     if (!skinnedPrims) {
-      sub.torsoCoDeformation = { pass: false, measured: 'no skinned primitives (POSITION+JOINTS_0+WEIGHTS_0) found', p95Frac: null };
-    } else if (!torsoVertexCount) {
-      sub.torsoCoDeformation = { pass: false, measured: 'no vertices with a torso-dominant joint found — cannot verify torso stability', p95Frac: null };
+      sub.bodyCoDeformation = { pass: false, measured: 'no skinned primitives (POSITION+JOINTS_0+WEIGHTS_0) found', over3Frac: null };
+      sub.edgeStrain = { pass: false, measured: 'no skinned primitives found', maxRatio: null };
+    } else if (!bodyVertexCount) {
+      sub.bodyCoDeformation = { pass: false, measured: 'no vertices dominated by a non-waving-arm joint found — cannot verify body stability', over3Frac: null };
+      sub.edgeStrain = { pass: false, measured: 'no body vertices found', maxRatio: null };
     } else {
-      perVertexMax.sort((a, b) => a - b);
-      const p95 = percentile(perVertexMax, 0.95);
-      const frac = p95 / height;
-      sub.torsoCoDeformation = {
-        pass: frac <= THRESHOLDS.WAVE_MAX_TORSO_P95_DISPLACEMENT_FRAC,
-        measured: `p95 torso-vertex displacement ${p95.toFixed(4)} units = ${(frac * 100).toFixed(2)}% of model height ` +
-          `(${torsoVertexCount} torso-dominant vertices, ${nSamples} frames); threshold <= ${THRESHOLDS.WAVE_MAX_TORSO_P95_DISPLACEMENT_FRAC * 100}%`,
-        p95Units: p95, p95Frac: frac, torsoVertexCount, samples: nSamples,
+      const over3Frac = over3Count / bodyVertexCount;
+      const okFrac = over3Frac <= THRESHOLDS.BODY_DISPLACEMENT_MAX_OFFENDER_RATIO;
+      const okHard = maxDisp.frac <= THRESHOLDS.BODY_DISPLACEMENT_HARD_FRAC;
+      sub.bodyCoDeformation = {
+        pass: okFrac && okHard,
+        measured: `${over3Count} of ${bodyVertexCount} non-waving-arm vertices (${(over3Frac * 100).toFixed(2)}%) ` +
+          `moved > ${THRESHOLDS.BODY_DISPLACEMENT_SOFT_FRAC * 100}% h (allowed <= ${THRESHOLDS.BODY_DISPLACEMENT_MAX_OFFENDER_RATIO * 100}%)` +
+          (over3Example ? `, worst offender ${(over3Example.frac * 100).toFixed(2)}% h` : '') +
+          `; max displacement ${(maxDisp.frac * 100).toFixed(2)}% h (hard cap ${THRESHOLDS.BODY_DISPLACEMENT_HARD_FRAC * 100}% h)` +
+          `; ${nSamples} frames`,
+        bodyVertexCount, over3Count, over3Frac, maxFrac: maxDisp.frac, maxUnits: maxDisp.units,
+        samples: nSamples,
+      };
+      sub.edgeStrain = {
+        pass: strain.maxRatio <= THRESHOLDS.BODY_EDGE_STRAIN_MAX_RATIO,
+        measured: `max edge-length ratio ${strain.maxRatio.toFixed(2)}x vs the clip's first frame over ` +
+          `${bodyTriCount} all-body triangles (${bodyEdgeCount} edges); threshold <= ${THRESHOLDS.BODY_EDGE_STRAIN_MAX_RATIO}x`,
+        maxRatio: strain.maxRatio, bodyTriCount, bodyEdgeCount,
       };
     }
   }
 
   const pass = Object.values(sub).every(s => s.pass);
-  const summary = `arm=${best.side} ("${best.name}"), peak ${best.peakRestDeg.toFixed(1)} deg, ` +
-    `${sub.oscillations.oscillations} oscillations, root ${(sub.rootTranslation.rangeFrac * 100).toFixed(2)}% h, ` +
-    `torso rot ${sub.torsoRotation.maxDeg.toFixed(1)} deg, torso p95 ` +
-    `${sub.torsoCoDeformation.p95Frac === null ? 'n/a' : (sub.torsoCoDeformation.p95Frac * 100).toFixed(2) + '% h'}`;
+  const summary = `arm=${best.side} ("${best.name}"), peak ${best.peakStartDeg.toFixed(1)} deg from clip start, ` +
+    `hand-above-shoulder ${sub.handAboveShoulder.pass ? 'yes' : 'NO'}, ` +
+    `${sub.oscillations.oscillations} oscillations, other arm ${sub.otherArmStill.maxDeg.toFixed(1)} deg, ` +
+    `root worst ${(sub.rootTranslation.rangeFrac * 100).toFixed(2)}% h, ` +
+    `torso rot ${sub.torsoRotation.maxDeg.toFixed(1)} deg, ` +
+    `body over-3%h ${sub.bodyCoDeformation.over3Frac === null ? 'n/a' : (sub.bodyCoDeformation.over3Frac * 100).toFixed(2) + '%'}` +
+    `, max ${sub.bodyCoDeformation.maxFrac === undefined ? 'n/a' : (sub.bodyCoDeformation.maxFrac * 100).toFixed(2) + '% h'}` +
+    `, strain ${sub.edgeStrain.maxRatio === null ? 'n/a' : sub.edgeStrain.maxRatio.toFixed(2) + 'x'}`;
   return {
-    id: 'waveArm', title: 'wave-arm check (rotation, oscillation, stability, co-deformation)',
+    id: 'waveArm', title: 'wave check V1-V3 (arm, oscillation, stability, co-deformation, strain)',
     pass, measured: summary,
     details: { subChecks: sub, clipDuration: pose.duration, samples: nSamples, wavedArm: best.side, modelHeight: height },
+  };
+}
+
+/* ---------------------------- V4 weight leakage --------------------------- */
+
+/**
+ * V4: ZERO vertices whose dominant joint is a head/neck joint may carry
+ * more than HEAD_ARM_WEIGHT_MAX total arm-chain weight (either arm, full
+ * chain including shoulder, summed over the 4 influences). Static check —
+ * no animation needed (reviewer A2).
+ */
+function checkWeightLeakage(docs) {
+  const rows = [];
+  let pass = true;
+  for (const doc of docs) {
+    const cls = classifyJoints(doc);
+    if (!cls.joints.size) { rows.push({ file: doc.label, ok: false, detail: 'no skin joints' }); pass = false; continue; }
+    if (!cls.headNeck.size) {
+      rows.push({ file: doc.label, ok: true, detail: 'no head/neck-named joints — nothing to leak onto (pattern list may need extending)' });
+      continue;
+    }
+    let headVerts = 0, violations = 0, worst = { w: 0, node: null, vert: -1 };
+    const rendered = renderedNodeSet(doc);
+    for (const n of rendered) {
+      const node = doc.json.nodes[n];
+      if (!node || node.mesh === undefined || node.skin === undefined) continue;
+      const jointsArr = doc.json.skins[node.skin].joints;
+      for (const prim of doc.json.meshes[node.mesh].primitives || []) {
+        const at = prim.attributes || {};
+        if (at.POSITION === undefined || at.JOINTS_0 === undefined || at.WEIGHTS_0 === undefined) continue;
+        const jnt = doc.accessor(at.JOINTS_0);
+        const wgt = doc.accessor(at.WEIGHTS_0);
+        const nv = doc.accessor(at.POSITION).count;
+        for (let v = 0; v < nv; v++) {
+          let domK = -1, domW = -1, armW = 0;
+          for (let c = 0; c < 4; c++) {
+            const w = wgt.data[v * 4 + c];
+            const j = jointsArr[jnt.data[v * 4 + c]];
+            if (w > domW) { domW = w; domK = j; }
+            if (w > 0 && j !== undefined && cls.armAll.has(j)) armW += w;
+          }
+          if (domW <= 0 || domK === undefined || !cls.headNeck.has(domK)) continue;
+          headVerts++;
+          if (armW > THRESHOLDS.HEAD_ARM_WEIGHT_MAX) {
+            violations++;
+            if (armW > worst.w) worst = { w: armW, node: doc.nodeName(n), vert: v };
+          }
+        }
+      }
+    }
+    const ok = violations === 0;
+    rows.push({
+      file: doc.label, ok, headVerts, violations,
+      detail: `${headVerts} head/neck-dominated vertices; ${violations} carry > ` +
+        `${THRESHOLDS.HEAD_ARM_WEIGHT_MAX} total arm-chain weight` +
+        (violations ? ` (worst ${worst.w.toFixed(2)} on node "${worst.node}" vertex ${worst.vert})` : ''),
+    });
+    if (!ok) pass = false;
+  }
+  return {
+    id: 'weightLeakage',
+    title: `V4 weight leakage: no head/neck-dominated vertex carries > ${THRESHOLDS.HEAD_ARM_WEIGHT_MAX} arm weight`,
+    pass,
+    measured: rows.map(r => `${r.file}: ${r.ok ? 'ok' : 'FAIL'} — ${r.detail}`).join('; '),
+    details: { rows },
+  };
+}
+
+/* ------------------------------ V5 loop seams ----------------------------- */
+
+/**
+ * V5: in `idle` and `walk`/`run`, every animated channel's value at the
+ * clip's end must equal its value at the clip's start within
+ * LOOP_SEAM_TRANSLATION_FRAC of model height (translation) /
+ * LOOP_SEAM_ROTATION_DEG degrees (rotation) / LOOP_SEAM_SCALE_REL relative
+ * (scale) — otherwise the loop visibly pops (and a clip whose root drifts,
+ * like a mislabeled walk, cannot close its seam).
+ */
+function checkLoopSeams(docs) {
+  const clipsWanted = [['idle'], ['walk', 'run']];
+  const rows = [];
+  let pass = true;
+  for (const names of clipsWanted) {
+    const hit = findClip(docs, names);
+    if (!hit) { rows.push({ clip: names.join('|'), ok: false, detail: 'clip not found' }); pass = false; continue; }
+    const { doc, anim, clipName } = hit;
+    const height = modelHeight(doc) || 1;
+    // Clip duration: the max end time over all samplers in the clip.
+    let duration = 0;
+    const chans = [];
+    for (const ch of anim.channels || []) {
+      const target = ch.target || {};
+      if (target.node === undefined) continue;
+      if (!['translation', 'rotation', 'scale'].includes(target.path)) continue;
+      const s = buildAnimSampler(doc, anim.samplers[ch.sampler], target.path);
+      duration = Math.max(duration, s.duration);
+      chans.push({ node: target.node, path: target.path, s });
+    }
+    const violations = [];
+    for (const { node, path: p, s } of chans) {
+      const v0 = s.sample(0), v1 = s.sample(duration);
+      if (!v0 || !v1) continue;
+      if (p === 'rotation') {
+        const dq = quatMul(quatConj(quatNormalize(v0)), quatNormalize(v1));
+        const deg = quatAngle(dq) * DEG;
+        if (deg > THRESHOLDS.LOOP_SEAM_ROTATION_DEG) {
+          violations.push({ node: doc.nodeName(node), path: p, delta: `${deg.toFixed(2)} deg` });
+        }
+      } else if (p === 'translation') {
+        const d = Math.hypot(v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2]);
+        if (d / height > THRESHOLDS.LOOP_SEAM_TRANSLATION_FRAC) {
+          violations.push({ node: doc.nodeName(node), path: p, delta: `${(d / height * 100).toFixed(2)}% h` });
+        }
+      } else { // scale
+        let rel = 0;
+        for (let c = 0; c < 3; c++) rel = Math.max(rel, Math.abs(v1[c] - v0[c]) / (Math.abs(v0[c]) || 1));
+        if (rel > THRESHOLDS.LOOP_SEAM_SCALE_REL) {
+          violations.push({ node: doc.nodeName(node), path: p, delta: `${(rel * 100).toFixed(2)}% rel` });
+        }
+      }
+    }
+    const ok = violations.length === 0;
+    rows.push({
+      clip: clipName, ok, channels: chans.length, violations,
+      detail: ok
+        ? `${chans.length} channels close their loop (<= ${THRESHOLDS.LOOP_SEAM_TRANSLATION_FRAC * 100}% h / ` +
+          `${THRESHOLDS.LOOP_SEAM_ROTATION_DEG} deg)`
+        : `${violations.length} channel(s) do not close: ` +
+          violations.slice(0, 4).map(v => `${v.node}.${v.path} Δ${v.delta}`).join(', ') +
+          (violations.length > 4 ? ', …' : ''),
+    });
+    if (!ok) pass = false;
+  }
+  return {
+    id: 'loopSeam',
+    title: `V5 loop seams: idle & walk|run end where they start (<= ${THRESHOLDS.LOOP_SEAM_TRANSLATION_FRAC * 100}% h / ${THRESHOLDS.LOOP_SEAM_ROTATION_DEG} deg)`,
+    pass,
+    measured: rows.map(r => `${r.clip}: ${r.ok ? 'ok' : 'FAIL'} — ${r.detail}`).join('; '),
+    details: { rows },
+  };
+}
+
+/* -------------------------------- V6 jump --------------------------------- */
+
+/**
+ * V6: in `jump`, at some sampled frame EVERY foot joint (name tokens
+ * foot|toe|ankle) must be at least JUMP_MIN_FOOT_RISE_FRAC of model height
+ * above that joint's own clip-start world height — the character actually
+ * leaves the ground.
+ */
+function checkJump(docs) {
+  const hit = findClip(docs, ['jump']);
+  const failRes = msg => ({
+    id: 'jump', title: `V6 jump: feet rise >= ${THRESHOLDS.JUMP_MIN_FOOT_RISE_FRAC * 100}% h`,
+    pass: false, measured: msg, details: { error: msg },
+  });
+  if (!hit) return failRes('no animation named "jump" found in any file');
+  const { doc, anim } = hit;
+  const cls = classifyJoints(doc);
+  const height = modelHeight(doc);
+  if (!(height > 0)) return failRes('model height is zero — cannot scale thresholds');
+  if (!cls.feet.size) {
+    return failRes(`no foot joints matched JOINT_NAME_PATTERNS.foot (${JOINT_NAME_PATTERNS.foot.join('|')}) ` +
+      `among skin joints: [${[...cls.joints].map(j => doc.nodeName(j)).join(', ')}]`);
+  }
+  const pose = buildPoseSampler(doc, anim);
+  if (!(pose.duration > 0)) return failRes('"jump" clip has zero duration');
+  const times = sampleTimes(pose.duration);
+  const feet = [...cls.feet];
+  const startY = new Map();
+  let peak = { rise: -Infinity, t: 0 };
+  for (let f = 0; f < times.length; f++) {
+    const g = pose.globalsAt(times[f]);
+    let minRise = Infinity;
+    for (const j of feet) {
+      const y = g[j][13];
+      if (f === 0) startY.set(j, y);
+      const rise = y - startY.get(j);
+      if (rise < minRise) minRise = rise;
+    }
+    if (f > 0 && minRise > peak.rise) peak = { rise: minRise, t: times[f] };
+  }
+  const frac = peak.rise / height;
+  const need = THRESHOLDS.JUMP_MIN_FOOT_RISE_FRAC;
+  return {
+    id: 'jump',
+    title: `V6 jump: feet rise >= ${need * 100}% h`,
+    pass: frac >= need,
+    measured: `best simultaneous rise of ALL ${feet.length} foot joint(s) ` +
+      `(${feet.map(j => doc.nodeName(j)).join(', ')}): ${peak.rise.toFixed(4)} units = ` +
+      `${(frac * 100).toFixed(1)}% h at t=${peak.t.toFixed(2)}s; threshold >= ${need * 100}% h`,
+    details: { riseUnits: peak.rise, riseFrac: frac, peakTime: peak.t, feet: feet.map(j => doc.nodeName(j)) },
   };
 }
 
@@ -1230,6 +1792,9 @@ export function validate(options = {}) {
   checks.push(guard(() => checkTriangles(docs)));
   checks.push(guard(() => checkBaseColorTexture(docs)));
   checks.push(guard(() => checkWaveArm(docs)));
+  checks.push(guard(() => checkWeightLeakage(docs)));
+  checks.push(guard(() => checkLoopSeams(docs)));
+  checks.push(guard(() => checkJump(docs)));
 
   return { ok: checks.every(c => c.pass), layout, files: fileLabels, checks };
 }

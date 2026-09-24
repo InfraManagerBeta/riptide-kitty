@@ -20,17 +20,25 @@ The character is defined by the four orthographic views in `reference/`
 
 ### Generation pipeline (spec 001)
 
-The kitty is **generated, not hand-modeled**, with Tripo3D:
+The kitty is **generated, not hand-modeled**, with Tripo3D. Only ONE
+repository image went into Tripo: `reference/kitty-front.png`. Every other
+view in the pipeline is **Tripo-derived**, not the repository's back/left/
+right orthographic references:
 
-1. **Arms-apart derivative** of the `reference/` views (so the arms rig as
-   separate limbs, not fused to the torso).
-2. **Multiview-to-model** — Tripo3D `multiview_to_model` from the four
-   orthographic views.
-3. **Auto-rig** — Tripo3D biped/humanoid rig.
-4. **Animations** — preset retargets for `idle` / `jump` / `walk` (or `run`)
+1. **Multiview derivation** — Tripo3D `generate_multiview_image` regenerates
+   a consistent 4-view turnaround from the single front reference.
+2. **Arms-apart edit** — Tripo3D `edit_multiview_image` re-poses those
+   derived views into an arms-up A-pose (so the arms rig as separate limbs,
+   not fused to the torso). These edited, Tripo-derived views are saved
+   under `assets/kitty/derived/`.
+3. **Multiview-to-model** — Tripo3D `multiview_to_model` from the
+   **Tripo-derived arms-apart views** (step 2), not from the four
+   orthographic views in `reference/`.
+4. **Auto-rig** — Tripo3D biped/humanoid rig.
+5. **Animations** — preset retargets for `idle` / `jump` / `walk` (or `run`)
    plus an authored `wave` (one arm raised, at least two oscillations, body
    held stable).
-5. **Single-GLB merge** — all four clips in `assets/kitty/kitty.glb`
+6. **Single-GLB merge** — all four clips in `assets/kitty/kitty.glb`
    (spec-allowed fallback: four files `assets/kitty/kitty-<clip>.glb`).
 
 The exact prompts, tool/model versions, and per-stage Tripo3D task IDs are
@@ -43,26 +51,48 @@ Requires Node >= 20; zero dependencies, no install step.
 
 ```sh
 # validate the asset (assets/kitty/kitty.glb or the four-file layout);
-# prints a PASS/FAIL table per check and exits non-zero on any failure:
+# prints a PASS/FAIL table per check and exits non-zero on any failure
+# (a MISSING asset is a failure — CI green means the asset passes):
 node scripts/validate-kitty.mjs
 
 # validate a specific file or directory:
 node scripts/validate-kitty.mjs path/to/kitty.glb
 
-# run the validator's self-test on synthetic in-memory GLB fixtures:
+# run the validator's self-test on synthetic in-memory GLB fixtures
+# (includes one fixture per adversarial mutation from the round-1 review):
 npm test
 ```
 
-Checks: >= 1 skin; the four clips by exact name (`walk` or `run` accepted);
-<= 20,000 rendered triangles; a PBR base-color texture with present image
-data on a skinned mesh; and the wave-arm check — arm rotation >= 45° with
->= 2 oscillations while the root barely translates (<= 5% of model height),
-torso joints barely rotate (<= 15°), and torso vertices barely move under
-linear-blend skinning (95th percentile <= 3% of model height). Thresholds
-and the joint-name patterns live in documented constants (`THRESHOLDS`,
-`JOINT_NAME_PATTERNS`) at the top of `scripts/validate-kitty.mjs`. CI runs
-the same self-test and validator on every push and pull request
-(`.github/workflows/validate-kitty.yml`).
+#### Validator checks and thresholds
+
+Every threshold is a documented constant in `THRESHOLDS`, and every joint
+name pattern in `JOINT_NAME_PATTERNS`, at the top of
+`scripts/validate-kitty.mjs`. Model height *h* = Y extent of the POSITION
+bounds. All animation measurements sample at 60 samples/s with correct
+STEP/LINEAR/CUBICSPLINE interpolation.
+
+| Check | Requirement | Threshold |
+|---|---|---|
+| a. skin | at least one skin | >= 1 |
+| b. clips | `idle`, `jump`, `walk` (or `run`), `wave` by exact name | all present |
+| c. triangles | rendered triangles: summed per node instance, all scenes, **multiplied by `EXT_mesh_gpu_instancing` instance counts**; strips/fans = count−2, points/lines = 0, morph targets add none | <= 20,000 |
+| d. texture | a `baseColorTexture` on a material used by a skinned primitive whose image bytes are a **real PNG/JPEG** (magic bytes + parseable header, nonzero width×height — declared mimeType is ignored) | valid image |
+| V1 arm rotation | some joint of the waving arm chain rotates vs the **wave clip's first frame** (never the bind pose); the side is chosen by in-clip motion | >= 45° |
+| V1 raised hand | at the peak frame, the waving hand/wrist world height >= that arm's shoulder (or upper-arm) joint height + margin | +5% *h* |
+| V1 oscillations | direction reversals of the dominant rotation component, with hysteresis (swings must span max(10°, 20% of range)) | >= 2 |
+| V1 other arm | every joint of the non-waving arm chain stays put in-clip | <= 15° |
+| V2 root translation | world-translation range of **every** root candidate: the top joint, every `root\|hips\|pelvis` joint, and the topmost joint with an animated translation channel | each <= 5% *h* |
+| V2 torso rotation | max torso joint rotation vs the clip's first frame | <= 15° |
+| V3 co-deformation | linear-blend-skinned displacement vs the clip's first frame, over **all** vertices not dominated by the waving arm chain (head, tail, legs, other arm included; shoulder-dominated skin counts as body) | <= 0.5% of them may move > 3% *h*, none > 8% *h* |
+| V3 edge strain | max edge-length ratio vs the clip's first frame over triangles whose three vertices are all non-waving-arm | <= 1.5× |
+| V4 weight leakage | vertices dominated by a head/neck joint carrying > 0.2 total arm-chain weight (either arm) | zero vertices |
+| V5 loop seams | in `idle` and `walk`/`run`, every channel's end value equals its start value | <= 1% *h* translation, <= 2° rotation, <= 1% scale |
+| V6 jump | at some frame, **every** foot joint (`foot\|toe\|ankle`) rises above its clip-start world height | >= 8% *h* |
+
+CI runs the same self-test and validator on every push and pull request
+(`.github/workflows/validate-kitty.yml`). The validator (and therefore CI)
+**fails when no asset is present** — a green check means the committed
+asset passed every check above.
 
 ### Opening the viewer
 

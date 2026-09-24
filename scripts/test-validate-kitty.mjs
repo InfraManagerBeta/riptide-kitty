@@ -1,10 +1,12 @@
 /**
  * test-validate-kitty.mjs — self-test for scripts/validate-kitty.mjs.
  *
- * Builds SYNTHETIC skinned GLBs entirely in memory (a tiny torso+arms mesh
- * with a 6-joint skeleton and an embedded 1x1 PNG base-color texture) and
- * asserts that the validator passes a correct fixture and fails each broken
- * fixture on its SPECIFIC check.
+ * Builds SYNTHETIC skinned GLBs entirely in memory (a torso+head+arms mesh
+ * with a 10-joint skeleton — Root/Hips/Spine/Head/feet/arms — and an
+ * embedded 1x1 PNG base-color texture) and asserts that the validator
+ * passes a correct fixture and fails each broken fixture on its SPECIFIC
+ * check — including one fixture per adversarial mutation the round-1
+ * reviewer used to defeat the old validator (A1–A6).
  *
  * Run:  node --test scripts/test-validate-kitty.mjs
  *   or: node scripts/test-validate-kitty.mjs
@@ -12,7 +14,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { validate, THRESHOLDS, parseGLB, tokenizeName } from './validate-kitty.mjs';
+import { validate, THRESHOLDS, parseGLB, tokenizeName, sniffImage } from './validate-kitty.mjs';
 
 /* ========================================================================== *
  * Minimal GLB writer.
@@ -76,15 +78,25 @@ const PNG_1x1 = Uint8Array.from(Buffer.from(
 /* ========================================================================== *
  * Synthetic kitty fixture.
  *
- * Skeleton (Y-up, joint world positions):
- *   Hips (0,1,0) -> Spine (0,1.4,0) -> { L_Arm (0.35,1.55,0) -> L_Hand (0.65,1.55,0),
- *                                        R_Arm (-0.35,1.55,0) -> R_Hand (-0.65,1.55,0) }
- * Mesh: three boxes — torso (y 0.2..1.8, POSITION Y-extent => model height 1.6),
- * left arm, right arm. Torso verts weighted to Hips/Spine; arm verts to
- * L_Arm / R_Arm. Names deliberately exercise `L_` / `R_` prefix tokens.
+ * Skeleton (Y-up, joint world positions), deliberately with an un-animated
+ * `Root` ABOVE `Hips` (the reviewer's A6 mutation hid a hips lurch under a
+ * static Root):
+ *
+ *   Root (0,0,0)
+ *    └ Hips (0,1,0)
+ *       ├ L_Foot (0.1,0.1,0)   R_Foot (-0.1,0.1,0)
+ *       └ Spine (0,1.4,0)
+ *          ├ Head (0,1.9,0)
+ *          ├ L_Arm (0.35,1.55,0) → L_Hand (0.65,1.55,0)
+ *          └ R_Arm (-0.35,1.55,0) → R_Hand (-0.65,1.55,0)
+ *
+ * Mesh: four boxes — torso (y 0.2..1.8), head (y 1.75..2.05 ⇒ model height
+ * 1.85), left arm, right arm. Torso verts weighted to Hips/Spine; head
+ * verts to Head; arm verts to L_Arm / R_Arm. Names deliberately exercise
+ * `L_` / `R_` prefix tokens.
  * ========================================================================== */
 
-const MODEL_HEIGHT = 1.6;
+export const MODEL_HEIGHT = 1.85;
 
 function rotZ(deg) {
   const a = (deg * Math.PI / 180) / 2;
@@ -117,9 +129,28 @@ const BOX_TRIS = [ // 12 triangles over the 8-corner ordering above
  *   clips: array of clip names to embed (default all four)
  *   walkName: 'walk' | 'run'
  *   skin: include skin + JOINTS_0/WEIGHTS_0 (default true)
- *   texture: include baseColorTexture (default true)
- *   hugeTriangles: exceed the triangle budget (default false)
- *   wave: 'good' | 'small' | 'oneOsc' | 'lurch' | 'spineRotate' | 'codeform'
+ *   texture: true | false | 'zeroed'  (zeroed = image bytes all 0x00 — A5)
+ *   hugeTriangles: exceed the triangle budget with plain geometry
+ *   instancing: 0 | N — put EXT_mesh_gpu_instancing xN on the mesh node (A4)
+ *   jumpGrounded: jump clip never lifts the feet (V6 fail)
+ *   walkDrift: walk clip's hips translate away and never return (V5 fail)
+ *   wave:
+ *     'good'          clean LEFT-arm wave (default; must PASS everything)
+ *     'goodRight'     clean RIGHT-arm wave (side selection must follow)
+ *     'leftCheerRight' clean LEFT wave; the static RIGHT arm's BIND pose is
+ *                     an arms-up "cheer" (A1's side-pick trap — must PASS)
+ *     'limp'          A1: bind pose arms-up, in-clip the arm hangs at the
+ *                     hip and the forearm wiggles ±9°
+ *     'small'         arm barely moves (10°)
+ *     'oneOsc'        a single raise-lower
+ *     'lurch'         A6: hips translate under the static Root
+ *     'spineRotate'   the spine rotates with the wave
+ *     'codeform'      A3: ONE torso vertex co-weighted to the arm (small
+ *                     fraction — a p95 would hide it)
+ *     'headLeak'      A2: head vertices 40% weighted to the arm
+ *     'bothArms'      the other arm waves too (V1 fail)
+ *     'strain'        a tiny all-body triangle stretches > 1.5x while every
+ *                     displacement stays under 3% h (V3 strain fail)
  */
 export function makeKitty(opts = {}) {
   const {
@@ -128,6 +159,9 @@ export function makeKitty(opts = {}) {
     skin = true,
     texture = true,
     hugeTriangles = false,
+    instancing = 0,
+    jumpGrounded = false,
+    walkDrift = false,
     wave = 'good',
   } = opts;
 
@@ -147,42 +181,63 @@ export function makeKitty(opts = {}) {
   };
 
   // --- geometry ---------------------------------------------------------
-  const torso = boxVerts(0, 1.0, 0, 0.25, 0.8, 0.2);      // y 0.2 .. 1.8
-  const armL = boxVerts(0.575, 1.55, 0, 0.225, 0.05, 0.05); // x 0.35 .. 0.8
-  const armR = boxVerts(-0.575, 1.55, 0, 0.225, 0.05, 0.05);
-  const verts = [...torso, ...armL, ...armR];
-  const positions = new Float32Array(verts.flat());
+  const torso = boxVerts(0, 1.0, 0, 0.25, 0.8, 0.2);        // verts 0-7,  y 0.2 .. 1.8
+  const head = boxVerts(0, 1.9, 0, 0.12, 0.15, 0.12);       // verts 8-15, y 1.75 .. 2.05
+  const armL = boxVerts(0.575, 1.55, 0, 0.225, 0.05, 0.05); // verts 16-23
+  const armR = boxVerts(-0.575, 1.55, 0, 0.225, 0.05, 0.05);// verts 24-31
+  const verts = [...torso, ...head, ...armL, ...armR];
 
   const indicesArr = [];
-  for (let b = 0; b < 3; b++) for (const t of BOX_TRIS) indicesArr.push(...t.map(i => i + b * 8));
+  for (let b = 0; b < 4; b++) for (const t of BOX_TRIS) indicesArr.push(...t.map(i => i + b * 8));
+
+  // 'strain' adds a tiny torso-surface triangle (verts 32,33,34) whose apex
+  // is lightly co-weighted to the arm: it stretches its 0.01-long edges by
+  // > 1.5x while moving < 3% of model height.
+  if (wave === 'strain') {
+    verts.push([0, 0.5, 0.2], [0.01, 0.5, 0.2], [0, 0.51, 0.2]);
+    indicesArr.push(32, 33, 34);
+  }
   if (hugeTriangles) {
     // Degenerate but structurally valid extra triangles to blow the budget.
-    const extra = THRESHOLDS.MAX_TRIANGLES; // 36 real + 20,000 extra > 20,000
+    const extra = THRESHOLDS.MAX_TRIANGLES; // 48 real + 20,000 extra > 20,000
     for (let i = 0; i < extra; i++) indicesArr.push(0, 1, 2);
   }
+  const positions = new Float32Array(verts.flat());
   const indices = new Uint16Array(indicesArr);
   const texcoord = new Float32Array(verts.length * 2); // all zeros
 
-  // Skin weights. Joint order in skin.joints: 0 Hips, 1 Spine, 2 L_Arm,
-  // 3 L_Hand, 4 R_Arm, 5 R_Hand.
+  // Skin weights. skin.joints order:
+  //   0 Root, 1 Hips, 2 Spine, 3 L_Foot, 4 R_Foot, 5 Head,
+  //   6 L_Arm, 7 L_Hand, 8 R_Arm, 9 R_Hand.
   const joints0 = new Uint8Array(verts.length * 4);
   const weights0 = new Float32Array(verts.length * 4);
   const setW = (v, pairs) => {
     pairs.forEach(([j, w], c) => { joints0[v * 4 + c] = j; weights0[v * 4 + c] = w; });
   };
-  for (let v = 0; v < 8; v++) {
+  let codeformDone = false;
+  for (let v = 0; v < 8; v++) { // torso
     const y = verts[v][1];
-    if (wave === 'codeform' && y > 1.0) {
-      // torso verts co-weighted to the LEFT ARM: dominant joint stays the
-      // torso (Spine, 0.55) so these verts are IN the torso set — and they
-      // get dragged by the waving arm. This is the fused-arm failure mode.
-      setW(v, [[1, 0.55], [2, 0.45]]);
+    if (wave === 'codeform' && y > 1.0 && !codeformDone) {
+      // A3: exactly ONE torso vertex co-weighted to the LEFT ARM — dominant
+      // joint stays the torso (Spine 0.55), so the vertex is IN the body
+      // set, and it is a SMALL fraction of body vertices (a p95 hides it).
+      setW(v, [[2, 0.55], [6, 0.45]]);
+      codeformDone = true;
     } else {
-      setW(v, [[y > 1.0 ? 1 : 0, 1]]);
+      setW(v, [[y > 1.0 ? 2 : 1, 1]]);
     }
   }
-  for (let v = 8; v < 16; v++) setW(v, [[2, 1]]);   // left arm -> L_Arm
-  for (let v = 16; v < 24; v++) setW(v, [[4, 1]]);  // right arm -> R_Arm
+  for (let v = 8; v < 16; v++) { // head
+    if (wave === 'headLeak') setW(v, [[5, 0.6], [6, 0.4]]); // A2: 40% on the arm
+    else setW(v, [[5, 1]]);
+  }
+  for (let v = 16; v < 24; v++) setW(v, [[6, 1]]);  // left arm -> L_Arm
+  for (let v = 24; v < 32; v++) setW(v, [[8, 1]]);  // right arm -> R_Arm
+  if (wave === 'strain') {
+    setW(32, [[1, 1]]);
+    setW(33, [[1, 1]]);
+    setW(34, [[1, 0.97], [7, 0.03]]); // apex: 3% on L_Hand — moves ~1.8% h
+  }
 
   const posMin = [Infinity, Infinity, Infinity], posMax = [-Infinity, -Infinity, -Infinity];
   for (const [x, y, z] of verts) {
@@ -200,33 +255,43 @@ export function makeKitty(opts = {}) {
   }
 
   // --- skeleton ---------------------------------------------------------
-  // node 0: mesh node; nodes 1..6: joints.
+  // node 0: mesh node; nodes 1..10: joints.
   const jointWorld = {
-    Hips: [0, 1, 0], Spine: [0, 1.4, 0],
+    Root: [0, 0, 0], Hips: [0, 1, 0], Spine: [0, 1.4, 0],
+    L_Foot: [0.1, 0.1, 0], R_Foot: [-0.1, 0.1, 0], Head: [0, 1.9, 0],
     L_Arm: [0.35, 1.55, 0], L_Hand: [0.65, 1.55, 0],
     R_Arm: [-0.35, 1.55, 0], R_Hand: [-0.65, 1.55, 0],
   };
   const nodes = [
     { name: 'KittyMesh', mesh: 0, ...(skin ? { skin: 0 } : {}) },
-    { name: 'Hips', translation: [0, 1, 0], children: [2] },
-    { name: 'Spine', translation: [0, 0.4, 0], children: [3, 5] },
-    { name: 'L_Arm', translation: [0.35, 0.15, 0], children: [4] },
+    { name: 'Root', translation: [0, 0, 0], children: [2] },
+    { name: 'Hips', translation: [0, 1, 0], children: [3, 4, 5] },
+    { name: 'Spine', translation: [0, 0.4, 0], children: [6, 7, 9] },
+    { name: 'L_Foot', translation: [0.1, -0.9, 0] },
+    { name: 'R_Foot', translation: [-0.1, -0.9, 0] },
+    { name: 'Head', translation: [0, 0.5, 0] },
+    { name: 'L_Arm', translation: [0.35, 0.15, 0], children: [8] },
     { name: 'L_Hand', translation: [0.3, 0, 0] },
-    { name: 'R_Arm', translation: [-0.35, 0.15, 0], children: [6] },
+    { name: 'R_Arm', translation: [-0.35, 0.15, 0], children: [10] },
     { name: 'R_Hand', translation: [-0.3, 0, 0] },
   ];
-  const jointNodeOrder = ['Hips', 'Spine', 'L_Arm', 'L_Hand', 'R_Arm', 'R_Hand'];
+  // A1 rigs bind the arms UP (a "cheer") while the clip starts arms-down.
+  if (wave === 'limp') nodes[7].rotation = rotZ(110);        // L_Arm bind: up
+  if (wave === 'leftCheerRight') nodes[9].rotation = rotZ(-110); // R_Arm bind: up (static in-clip)
+
+  const jointNodeOrder = ['Root', 'Hips', 'Spine', 'L_Foot', 'R_Foot', 'Head', 'L_Arm', 'L_Hand', 'R_Arm', 'R_Hand'];
   const skinDef = skin ? (() => {
     const ibm = new Float32Array(jointNodeOrder.flatMap(n => invTranslation(jointWorld[n])));
     const accIBM = addAccessor(ibm, 5126, 'MAT4');
-    return [{ name: 'KittyRig', joints: [1, 2, 3, 4, 5, 6], skeleton: 1, inverseBindMatrices: accIBM }];
+    return [{ name: 'KittyRig', joints: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], skeleton: 1, inverseBindMatrices: accIBM }];
   })() : undefined;
 
   // --- material / texture ------------------------------------------------
   const images = [], textures = [], samplers = [];
   const material = { name: 'KittyFur', pbrMetallicRoughness: { baseColorFactor: [1, 0.7, 0.2, 1] } };
   if (texture) {
-    const bvPng = addBV(PNG_1x1);
+    const png = texture === 'zeroed' ? new Uint8Array(PNG_1x1.length) : PNG_1x1; // A5
+    const bvPng = addBV(png);
     images.push({ mimeType: 'image/png', bufferView: bvPng });
     samplers.push({ magFilter: 9729, minFilter: 9729 });
     textures.push({ source: 0, sampler: 0 });
@@ -252,40 +317,58 @@ export function makeKitty(opts = {}) {
     animations.push(anim);
   };
 
-  const NODE = { Hips: 1, Spine: 2, L_Arm: 3, L_Hand: 4, R_Arm: 5, R_Hand: 6 };
+  const NODE = { Root: 1, Hips: 2, Spine: 3, L_Foot: 4, R_Foot: 5, Head: 6, L_Arm: 7, L_Hand: 8, R_Arm: 9, R_Hand: 10 };
   const trivialClip = name => addClip(name, [{
     node: NODE.Spine, path: 'rotation',
     times: [0, 0.5, 1], values: [rotX(0), rotX(2), rotX(0)],
   }]);
 
+  const armProfile = (node, degs, dur = 1.5) => ({
+    node, path: 'rotation',
+    times: degs.map((_, i) => (i / (degs.length - 1)) * dur),
+    values: degs.map(rotZ),
+  });
+
   const waveChannels = () => {
+    const GOOD = [0, 60, 15, 60, 15, 60, 0];
     const ch = [];
-    const armWave = (degs, dur = 1.5) => ({
-      node: NODE.L_Arm, path: 'rotation',
-      times: degs.map((_, i) => (i / (degs.length - 1)) * dur),
-      values: degs.map(rotZ),
-    });
     switch (wave) {
       case 'good':
-      case 'codeform': // geometry-side failure; the clip itself is a good wave
-        ch.push(armWave([0, 60, 15, 60, 15, 60, 0]));
+      case 'leftCheerRight': // clip-side identical; only the R bind differs
+      case 'codeform':       // geometry-side failure; the clip is a good wave
+      case 'headLeak':       // ditto
+      case 'strain':         // ditto
+        ch.push(armProfile(NODE.L_Arm, GOOD));
+        break;
+      case 'goodRight':
+        ch.push(armProfile(NODE.R_Arm, GOOD.map(d => -d)));
+        break;
+      case 'limp':
+        // A1: in-clip the arm sits at the hip (0° = straight out from the
+        // "down" start) and only wiggles ±9° — enormous vs the cheer BIND,
+        // tiny vs the clip's first frame.
+        ch.push(armProfile(NODE.L_Arm, [0, 9, 0, -9, 0, 9, 0, -9, 0]));
         break;
       case 'small':
-        ch.push(armWave([0, 10, 2, 10, 2, 10, 0]));
+        ch.push(armProfile(NODE.L_Arm, [0, 10, 2, 10, 2, 10, 0]));
         break;
       case 'oneOsc':
-        ch.push(armWave([0, 60, 0]));
+        ch.push(armProfile(NODE.L_Arm, [0, 60, 0]));
+        break;
+      case 'bothArms':
+        ch.push(armProfile(NODE.L_Arm, GOOD));
+        ch.push(armProfile(NODE.R_Arm, [0, -50, -12, -50, -12, -50, 0]));
         break;
       case 'lurch':
-        ch.push(armWave([0, 60, 15, 60, 15, 60, 0]));
+        ch.push(armProfile(NODE.L_Arm, GOOD));
         ch.push({
           node: NODE.Hips, path: 'translation',
           times: [0, 0.75, 1.5],
-          values: [[0, 1, 0], [0.3, 1, 0], [0, 1, 0]], // 0.3 units ~ 19% of height
+          values: [[0, 1, 0], [0.3, 1, 0], [0, 1, 0]], // 0.3 units ~ 16% of height
         });
         break;
       case 'spineRotate':
-        ch.push(armWave([0, 60, 15, 60, 15, 60, 0]));
+        ch.push(armProfile(NODE.L_Arm, GOOD));
         ch.push({
           node: NODE.Spine, path: 'rotation',
           times: [0, 0.75, 1.5], values: [rotX(0), rotX(40), rotX(0)],
@@ -299,13 +382,36 @@ export function makeKitty(opts = {}) {
 
   for (const clip of clips) {
     const name = clip === 'walk' ? walkName : clip;
-    if (clip === 'wave') addClip('wave', waveChannels());
-    else trivialClip(name);
+    if (clip === 'wave') {
+      addClip('wave', waveChannels());
+    } else if (clip === 'jump' && !jumpGrounded) {
+      // A real jump: the hips (and with them the feet) leave the ground.
+      addClip('jump', [{
+        node: NODE.Hips, path: 'translation',
+        times: [0, 0.4, 0.8],
+        values: [[0, 1, 0], [0, 1.35, 0], [0, 1, 0]], // +0.35 ~ 19% of height
+      }]);
+    } else if (clip === 'walk' && walkDrift) {
+      // V5: the hips translate away and the clip ends off its start value.
+      addClip(name, [{
+        node: NODE.Hips, path: 'translation',
+        times: [0, 1], values: [[0, 1, 0], [0.35, 1, 0]],
+      }]);
+    } else {
+      trivialClip(name); // includes jumpGrounded: feet never rise
+    }
   }
 
   // --- assemble ----------------------------------------------------------
   const attributes = { POSITION: accPos, TEXCOORD_0: accUV };
   if (skin) { attributes.JOINTS_0 = accJoints; attributes.WEIGHTS_0 = accWeights; }
+  let extensionsUsed;
+  if (instancing > 0) {
+    // A4: the node renders its mesh `instancing` times.
+    const accInst = addAccessor(new Float32Array(instancing * 3), 5126, 'VEC3');
+    nodes[0].extensions = { EXT_mesh_gpu_instancing: { attributes: { TRANSLATION: accInst } } };
+    extensionsUsed = ['EXT_mesh_gpu_instancing'];
+  }
   const binBytes = bin.bytes();
   const json = {
     asset: { version: '2.0', generator: 'test-validate-kitty synthetic fixture' },
@@ -317,6 +423,7 @@ export function makeKitty(opts = {}) {
     ...(skinDef ? { skins: skinDef } : {}),
     ...(animations.length ? { animations } : {}),
     ...(images.length ? { images, textures, samplers } : {}),
+    ...(extensionsUsed ? { extensionsUsed } : {}),
     accessors,
     bufferViews,
     buffers: [{ byteLength: binBytes.length }],
@@ -332,32 +439,35 @@ const check = (report, id) => report.checks.find(c => c.id === id);
 const subChecks = report => check(report, 'waveArm')?.details?.subChecks || {};
 
 /* ========================================================================== *
- * Tests.
+ * Tests — the original coverage.
  * ========================================================================== */
 
-test('correct single-GLB fixture PASSES all five checks', () => {
+test('correct single-GLB fixture PASSES all checks', () => {
   const report = validate({ files: { single: makeKitty() } });
   for (const c of report.checks) assert.equal(c.pass, true, `${c.id} should pass: ${c.measured}`);
   assert.equal(report.ok, true);
   assert.equal(report.layout, 'single');
   const sc = subChecks(report);
   assert.equal(check(report, 'waveArm').details.wavedArm, 'left');
-  assert.ok(sc.armRotation.peakRestDeg >= 45 && sc.armRotation.peakRestDeg <= 90,
-    `peak ${sc.armRotation.peakRestDeg}`);
+  assert.ok(sc.armRotation.peakStartDeg >= 45 && sc.armRotation.peakStartDeg <= 90,
+    `peak ${sc.armRotation.peakStartDeg}`);
+  assert.ok(sc.handAboveShoulder.marginFrac >= 0.05, `hand margin ${sc.handAboveShoulder.marginFrac}`);
   assert.ok(sc.oscillations.oscillations >= 2, `oscillations ${sc.oscillations.oscillations}`);
+  assert.ok(sc.otherArmStill.maxDeg <= 1, `other arm ${sc.otherArmStill.maxDeg}`);
   assert.ok(sc.rootTranslation.rangeFrac <= 0.001, `root moved ${sc.rootTranslation.rangeFrac}`);
-  assert.ok(sc.torsoCoDeformation.p95Frac <= 0.001, `torso p95 ${sc.torsoCoDeformation.p95Frac}`);
+  assert.equal(sc.bodyCoDeformation.over3Count, 0, sc.bodyCoDeformation.measured);
+  assert.ok(sc.edgeStrain.maxRatio <= 1.05, sc.edgeStrain.measured);
 });
 
 test('`run` is accepted in place of `walk`', () => {
   const report = validate({ files: { single: makeKitty({ walkName: 'run' }) } });
   assert.equal(check(report, 'clips').pass, true, check(report, 'clips').measured);
+  assert.equal(check(report, 'loopSeam').pass, true, check(report, 'loopSeam').measured);
   assert.equal(report.ok, true);
 });
 
 test('clip names are matched EXACTLY (a `Wave` clip does not satisfy `wave`)', () => {
   const glb = makeKitty({ clips: ['idle', 'jump', 'walk'] });
-  // add a wrongly-cased clip by rebuilding with renamed animation
   const { json } = parseGLB(glb);
   assert.ok(!json.animations.some(a => a.name === 'wave'));
   const report = validate({ files: { single: glb } });
@@ -376,6 +486,7 @@ test('FAILS: a missing clip (no `jump`)', () => {
   const c = check(report, 'clips');
   assert.equal(c.pass, false);
   assert.match(c.measured, /jump/);
+  assert.equal(check(report, 'jump').pass, false, 'V6 also reports the missing clip');
   assert.equal(report.ok, false);
 });
 
@@ -393,25 +504,26 @@ test('FAILS: no base-color texture', () => {
   assert.equal(report.ok, false);
 });
 
-test('FAILS wave (i): the arm barely moves (10 deg < 45 deg)', () => {
+test('FAILS wave V1: the arm barely moves (10 deg < 45 deg)', () => {
   const report = validate({ files: { single: makeKitty({ wave: 'small' }) } });
   const sc = subChecks(report);
   assert.equal(sc.armRotation.pass, false, sc.armRotation.measured);
-  assert.ok(sc.armRotation.peakRestDeg < 15, `peak ${sc.armRotation.peakRestDeg}`);
+  assert.ok(sc.armRotation.peakStartDeg < 15, `peak ${sc.armRotation.peakStartDeg}`);
   assert.equal(check(report, 'waveArm').pass, false);
   assert.equal(report.ok, false);
 });
 
-test('FAILS wave (ii): only one oscillation', () => {
+test('FAILS wave V1: only one oscillation', () => {
   const report = validate({ files: { single: makeKitty({ wave: 'oneOsc' }) } });
   const sc = subChecks(report);
   assert.equal(sc.armRotation.pass, true, 'the raise itself is big enough');
+  assert.equal(sc.handAboveShoulder.pass, true, 'the hand does get up there');
   assert.equal(sc.oscillations.pass, false, sc.oscillations.measured);
   assert.ok(sc.oscillations.oscillations < 2);
   assert.equal(report.ok, false);
 });
 
-test('FAILS wave (iii): hips translate (whole-body lurch)', () => {
+test('FAILS wave V2: hips translate (whole-body lurch)', () => {
   const report = validate({ files: { single: makeKitty({ wave: 'lurch' }) } });
   const sc = subChecks(report);
   assert.equal(sc.rootTranslation.pass, false, sc.rootTranslation.measured);
@@ -419,7 +531,7 @@ test('FAILS wave (iii): hips translate (whole-body lurch)', () => {
   assert.equal(report.ok, false);
 });
 
-test('FAILS wave (iv): the spine rotates with the wave', () => {
+test('FAILS wave V2: the spine rotates with the wave', () => {
   const report = validate({ files: { single: makeKitty({ wave: 'spineRotate' }) } });
   const sc = subChecks(report);
   assert.equal(sc.torsoRotation.pass, false, sc.torsoRotation.measured);
@@ -427,7 +539,7 @@ test('FAILS wave (iv): the spine rotates with the wave', () => {
   assert.equal(report.ok, false);
 });
 
-test('FAILS wave (v): torso vertices co-weighted to the arm (co-deformation)', () => {
+test('FAILS wave V3: torso vertices co-weighted to the arm (co-deformation)', () => {
   const report = validate({ files: { single: makeKitty({ wave: 'codeform' }) } });
   const sc = subChecks(report);
   // the clip itself is a clean wave — only the skinning is fused:
@@ -435,8 +547,9 @@ test('FAILS wave (v): torso vertices co-weighted to the arm (co-deformation)', (
   assert.equal(sc.oscillations.pass, true, sc.oscillations.measured);
   assert.equal(sc.rootTranslation.pass, true, sc.rootTranslation.measured);
   assert.equal(sc.torsoRotation.pass, true, sc.torsoRotation.measured);
-  assert.equal(sc.torsoCoDeformation.pass, false, sc.torsoCoDeformation.measured);
-  assert.ok(sc.torsoCoDeformation.p95Frac > 0.03, `p95 frac ${sc.torsoCoDeformation.p95Frac}`);
+  assert.equal(sc.bodyCoDeformation.pass, false, sc.bodyCoDeformation.measured);
+  assert.ok(sc.bodyCoDeformation.over3Frac > THRESHOLDS.BODY_DISPLACEMENT_MAX_OFFENDER_RATIO,
+    `over-3%h fraction ${sc.bodyCoDeformation.over3Frac}`);
   assert.equal(report.ok, false);
 });
 
@@ -479,4 +592,134 @@ test('joint-name tokenizer handles the documented rig-name shapes', () => {
   assert.deepEqual(tokenizeName('Spine02'), ['spine', '02']);
   // "Armature" must NOT tokenize to an `arm` match:
   assert.ok(!tokenizeName('Armature').includes('arm'));
+});
+
+/* ========================================================================== *
+ * Tests — the round-1 adversarial mutations (A1–A6) and the new checks.
+ * ========================================================================== */
+
+test('A1 FAILS: limp wave — arms-up bind pose, arm wiggles ±9° at the hip', () => {
+  const report = validate({ files: { single: makeKitty({ wave: 'limp' }) } });
+  const sc = subChecks(report);
+  // Measured vs the CLIP START (not the cheer bind): tiny.
+  assert.equal(sc.armRotation.pass, false, sc.armRotation.measured);
+  assert.ok(sc.armRotation.peakStartDeg < 20, `peak from clip start ${sc.armRotation.peakStartDeg}`);
+  // And the hand never rises above the shoulder.
+  assert.equal(sc.handAboveShoulder.pass, false, sc.handAboveShoulder.measured);
+  assert.equal(check(report, 'waveArm').pass, false);
+  assert.equal(report.ok, false);
+});
+
+test('A1 counterpart PASSES: left wave while the static right arm has a "cheer" bind pose (side selection by in-clip motion)', () => {
+  const report = validate({ files: { single: makeKitty({ wave: 'leftCheerRight' }) } });
+  assert.equal(report.ok, true, JSON.stringify(report.checks.filter(c => !c.pass).map(c => [c.id, c.measured])));
+  assert.equal(check(report, 'waveArm').details.wavedArm, 'left',
+    'the waving side must be chosen by in-clip motion, not by distance from the bind pose');
+  const sc = subChecks(report);
+  assert.equal(sc.otherArmStill.pass, true, sc.otherArmStill.measured);
+});
+
+test('right-arm wave PASSES and the side is reported as right', () => {
+  const report = validate({ files: { single: makeKitty({ wave: 'goodRight' }) } });
+  assert.equal(report.ok, true, JSON.stringify(report.checks.filter(c => !c.pass).map(c => [c.id, c.measured])));
+  assert.equal(check(report, 'waveArm').details.wavedArm, 'right');
+});
+
+test('A2 FAILS: head vertices 40% weighted to the arm (V4 weight leakage + V3 body set includes the head)', () => {
+  const report = validate({ files: { single: makeKitty({ wave: 'headLeak' }) } });
+  const leak = check(report, 'weightLeakage');
+  assert.equal(leak.pass, false, leak.measured);
+  assert.ok(leak.details.rows[0].violations >= 8, `violations ${leak.details.rows[0].violations}`);
+  // The dragged face is ALSO visible to V3 now (head-dominated vertices are
+  // body vertices, not exempt):
+  const sc = subChecks(report);
+  assert.equal(sc.bodyCoDeformation.pass, false, sc.bodyCoDeformation.measured);
+  assert.equal(report.ok, false);
+});
+
+test('A3 FAILS: a SMALL fraction of torso vertices co-weighted to the arm (a p95 would hide it)', () => {
+  const report = validate({ files: { single: makeKitty({ wave: 'codeform' }) } });
+  const sc = subChecks(report);
+  assert.equal(sc.bodyCoDeformation.pass, false, sc.bodyCoDeformation.measured);
+  // The offender pocket is under 5% of body vertices — exactly the pocket a
+  // 95th percentile ignores — but over the 0.5% budget:
+  assert.ok(sc.bodyCoDeformation.over3Frac < 0.05, `offenders ${sc.bodyCoDeformation.over3Frac}`);
+  assert.ok(sc.bodyCoDeformation.over3Frac > THRESHOLDS.BODY_DISPLACEMENT_MAX_OFFENDER_RATIO);
+  assert.equal(report.ok, false);
+});
+
+test('A4 FAILS: EXT_mesh_gpu_instancing multiplies rendered triangles past the budget', () => {
+  const report = validate({ files: { single: makeKitty({ instancing: 500 }) } });
+  const c = check(report, 'triangles');
+  assert.equal(c.pass, false, c.measured);
+  assert.equal(c.details.worst, 48 * 500, `worst ${c.details.worst}`);
+  assert.equal(report.ok, false);
+  // and a small instance count within budget still passes:
+  const ok = validate({ files: { single: makeKitty({ instancing: 3 }) } });
+  assert.equal(check(ok, 'triangles').pass, true, check(ok, 'triangles').measured);
+  assert.equal(check(ok, 'triangles').details.worst, 48 * 3);
+});
+
+test('A5 FAILS: base-color image bytes zeroed (magic/header check)', () => {
+  const report = validate({ files: { single: makeKitty({ texture: 'zeroed' }) } });
+  const c = check(report, 'baseColorTexture');
+  assert.equal(c.pass, false, c.measured);
+  assert.match(c.measured, /NOT a valid PNG\/JPEG/);
+  assert.equal(report.ok, false);
+  // sniffImage itself: real PNG parses, zeroed bytes do not.
+  assert.deepEqual(sniffImage(PNG_1x1), { format: 'PNG', width: 1, height: 1 });
+  assert.equal(sniffImage(new Uint8Array(PNG_1x1.length)), null);
+});
+
+test('A6 FAILS: hips-translation lurch hides under a never-animated Root parent', () => {
+  const report = validate({ files: { single: makeKitty({ wave: 'lurch' }) } });
+  const sc = subChecks(report);
+  assert.equal(sc.rootTranslation.pass, false, sc.rootTranslation.measured);
+  const byJoint = Object.fromEntries(sc.rootTranslation.candidates.map(c => [c.joint, c]));
+  // The old validator checked only `Root` (0.00%) and passed; every root
+  // candidate must be checked:
+  assert.ok(byJoint.Root, 'Root is a candidate (top joint + root-named)');
+  assert.ok(byJoint.Root.rangeFrac < 0.001, `Root moved ${byJoint.Root.rangeFrac}`);
+  assert.ok(byJoint.Hips, 'Hips is a candidate (root-named + topmost animated translation)');
+  assert.ok(byJoint.Hips.rangeFrac > 0.05, `Hips moved ${byJoint.Hips.rangeFrac}`);
+  assert.equal(report.ok, false);
+});
+
+test('FAILS wave V1: the other arm moves too', () => {
+  const report = validate({ files: { single: makeKitty({ wave: 'bothArms' }) } });
+  const sc = subChecks(report);
+  assert.equal(check(report, 'waveArm').details.wavedArm, 'left', 'the bigger mover is the waving arm');
+  assert.equal(sc.otherArmStill.pass, false, sc.otherArmStill.measured);
+  assert.ok(sc.otherArmStill.maxDeg > THRESHOLDS.WAVE_MAX_OTHER_ARM_DEG, `other arm ${sc.otherArmStill.maxDeg}`);
+  assert.equal(report.ok, false);
+});
+
+test('FAILS V5: walk with root drift does not close its loop seam', () => {
+  const report = validate({ files: { single: makeKitty({ walkDrift: true }) } });
+  const c = check(report, 'loopSeam');
+  assert.equal(c.pass, false, c.measured);
+  const walkRow = c.details.rows.find(r => r.clip === 'walk');
+  assert.ok(walkRow && !walkRow.ok, JSON.stringify(c.details.rows));
+  assert.ok(walkRow.violations.some(v => v.path === 'translation'), JSON.stringify(walkRow.violations));
+  const idleRow = c.details.rows.find(r => r.clip === 'idle');
+  assert.ok(idleRow && idleRow.ok, 'idle still closes its loop');
+  assert.equal(report.ok, false);
+});
+
+test('FAILS V6: a jump that never leaves the ground', () => {
+  const report = validate({ files: { single: makeKitty({ jumpGrounded: true }) } });
+  const c = check(report, 'jump');
+  assert.equal(c.pass, false, c.measured);
+  assert.ok(c.details.riseFrac < THRESHOLDS.JUMP_MIN_FOOT_RISE_FRAC, `rise ${c.details.riseFrac}`);
+  assert.equal(report.ok, false);
+});
+
+test('FAILS wave V3: body-triangle stretch (edge strain) even when every displacement stays under 3% h', () => {
+  const report = validate({ files: { single: makeKitty({ wave: 'strain' }) } });
+  const sc = subChecks(report);
+  assert.equal(sc.bodyCoDeformation.pass, true, sc.bodyCoDeformation.measured);
+  assert.equal(sc.bodyCoDeformation.over3Count, 0, sc.bodyCoDeformation.measured);
+  assert.equal(sc.edgeStrain.pass, false, sc.edgeStrain.measured);
+  assert.ok(sc.edgeStrain.maxRatio > THRESHOLDS.BODY_EDGE_STRAIN_MAX_RATIO, `ratio ${sc.edgeStrain.maxRatio}`);
+  assert.equal(report.ok, false);
 });

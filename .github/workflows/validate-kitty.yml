@@ -17,20 +17,8 @@ jobs:
       - name: Self-test (synthetic GLB fixtures)
         run: node --test scripts/test-validate-kitty.mjs
 
-      - name: Detect kitty asset
-        id: asset
-        run: |
-          if ls assets/kitty/*.glb >/dev/null 2>&1; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-          fi
-
+      # Green means the asset PASSES (spec-001). A missing asset is a
+      # failure like any other: the validator prints a clear message and
+      # exits non-zero — there is no warning-skip.
       - name: Validate the real asset
-        if: steps.asset.outputs.present == 'true'
         run: node scripts/validate-kitty.mjs
-
-      - name: Asset not present on this branch
-        if: steps.asset.outputs.present != 'true'
-        run: |
-          echo "::warning::assets/kitty/*.glb not found on this branch — asset validation skipped. The asset is produced on the t1 pipeline branch; once merged, this job validates it."
