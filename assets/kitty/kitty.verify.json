@@ -114,19 +114,19 @@
     "V3_co_deformation_displacement": {
       "pass": true,
       "detail": {
-        "non_waving_vertex_count": 10683,
-        "frac_over_3pct_height": 0.0,
+        "non_waving_vertex_count": 10685,
+        "frac_over_3pct_height": 0.009358914365933552,
         "max_allowed_frac_pct": 0.5,
-        "abs_max_disp_pct_height": 6.03047426855989e-14,
+        "abs_max_disp_pct_height": 3.361642667524034,
         "abs_max_allowed_pct": 8.0
       }
     },
     "V3_edge_stretch": {
       "pass": true,
       "detail": {
-        "max_edge_stretch": 1.000000000000116,
+        "max_edge_stretch": 1.3634944446592363,
         "max_allowed": 1.5,
-        "worst_frame_t": 0.06666666766007741
+        "worst_frame_t": 0.5333333412806193
       }
     }
   },
