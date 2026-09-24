@@ -31,6 +31,16 @@
  *      (<= 1% h translation / <= 2 deg rotation)
  *   V6 jump: at some frame every foot joint rises >= 8% h above its
  *      clip-start height
+ *   V7 limb integrity: in EVERY clip (idle, jump, walk|run, wave), skinned
+ *      geometry must ride the bones it wraps. For each vertex,
+ *      d_bind = bind-pose distance to the nearest bone segment of the
+ *      vertex's own weighted joints, and d_t = the same distance at each
+ *      sampled frame with each candidate bone carried rigidly by its
+ *      joint's motion; at most 0.2% of vertices may exceed
+ *      min(1.5 * d_bind, d_bind + 3% h) + 3% h at any frame and none may
+ *      exceed min(2 * d_bind, d_bind + 8% h) + 8% h (catches detached /
+ *      doubled limb geometry riding along with a bone chain even when its
+ *      dominant joint is exempt from V3)
  *
  * Node >= 20, ESM, ZERO runtime dependencies: the GLB container, glTF JSON,
  * accessors (incl. sparse, interleaved, normalized), animation samplers
@@ -156,6 +166,49 @@ export const THRESHOLDS = {
    *  model height above that joint's clip-start height (all feet at once =
    *  actually airborne; a single swinging foot is not a jump). */
   JUMP_MIN_FOOT_RISE_FRAC: 0.08,
+
+  /** V7. Limb integrity — geometry must ride the bones it wraps, in EVERY
+   *  clip. For each vertex, d_bind = distance (bind pose) to the nearest
+   *  bone segment of the vertex's OWN weighted joints; at each sampled
+   *  frame, d_t = the same distance with each candidate bone carried
+   *  rigidly by its joint's motion (equivalently: the skinned vertex is
+   *  transported back to bind space through the joint's rigid delta before
+   *  measuring). Geometry rigidly attached to any of its joints keeps
+   *  d_t = d_bind exactly — muzzles, ears and tail tips hanging off a leaf
+   *  joint are handled IN PRINCIPLE (a bone SEGMENT cannot represent the
+   *  leaf's orientation, so plain nearest-segment distance false-fails a
+   *  benign head turn by ~10% h; the joint's frame can). No joint is ever
+   *  exempted by name. A vertex offends at a frame when
+   *  d_t > min(d_bind * LIMB_SOFT_DBIND_SCALE,
+   *            d_bind + LIMB_DRIFT_SOFT_FRAC * h) + LIMB_SOFT_BASE_FRAC * h.
+   *  Maximum fraction of skinned vertices that may offend at ANY single
+   *  sampled frame; 0.2% tolerates isolated numeric outliers on a dense
+   *  mesh while a doubled limb (hundreds of vertices leaving their bones
+   *  together) is orders of magnitude past it. */
+  LIMB_OFFENDER_RATIO: 0.002,
+  /** V7. Soft allowance: multiplier on d_bind. 1.5x lets skin slide/bulge
+   *  around a bending joint (elbows, shoulders compress and stretch the
+   *  wrap distance) proportionally to its wrap radius. */
+  LIMB_SOFT_DBIND_SCALE: 1.5,
+  /** V7. Soft allowance: the multiplicative slack is CAPPED at this
+   *  fraction of model height — skin slide is bounded by tissue scale, not
+   *  by how far the geometry already floats. Without the cap, a limb-shaped
+   *  mass parked 25% h from every bone earns 12% h of free drift and a
+   *  doubled forearm sails through the check. */
+  LIMB_DRIFT_SOFT_FRAC: 0.03,
+  /** V7. Soft allowance: absolute floor as a fraction of model height, so
+   *  vertices that hug a bone (d_bind ~ 0) keep a realistic slack for
+   *  volume-preserving deformation. Matches V3's 3% h soft cap. */
+  LIMB_SOFT_BASE_FRAC: 0.03,
+  /** V7. Hard cap: NO vertex may ever exceed
+   *  min(d_bind * 2, d_bind + LIMB_DRIFT_HARD_FRAC * h) + 8% h. Anything
+   *  past this is geometry visibly detached from its bones, whatever its
+   *  weights. */
+  LIMB_HARD_DBIND_SCALE: 2,
+  /** V7. Hard cap on the multiplicative slack (fraction of model height). */
+  LIMB_DRIFT_HARD_FRAC: 0.08,
+  /** V7. Hard cap absolute part (fraction of model height). */
+  LIMB_HARD_BASE_FRAC: 0.08,
 };
 
 /**
@@ -1684,6 +1737,379 @@ function checkJump(docs) {
   };
 }
 
+/* ---------------------------- V7 limb integrity --------------------------- */
+
+/**
+ * Origin of the inverse of an affine column-major mat4 — i.e. the point p
+ * with M * p = origin. For a joint's inverseBindMatrix this is the joint's
+ * BIND-POSE position in mesh space. Returns null when the linear part is
+ * singular.
+ */
+function mat4AffineInvOrigin(m) {
+  // column-major: A[r][c] = m[c*4+r], t = (m[12], m[13], m[14])
+  const a = m[0], b = m[4], c = m[8];
+  const d = m[1], e = m[5], f = m[9];
+  const g = m[2], h = m[6], i = m[10];
+  const det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+  if (!(Math.abs(det) > 1e-12)) return null;
+  const tx = m[12], ty = m[13], tz = m[14];
+  return [
+    -((e * i - f * h) * tx + (c * h - b * i) * ty + (b * f - c * e) * tz) / det,
+    -((f * g - d * i) * tx + (a * i - c * g) * ty + (c * d - a * f) * tz) / det,
+    -((d * h - e * g) * tx + (b * g - a * h) * ty + (a * e - b * d) * tz) / det,
+  ];
+}
+
+/** Full affine inverse of a column-major mat4 (null when singular). */
+function mat4AffineInverse(m) {
+  const a = m[0], b = m[4], c = m[8];
+  const d = m[1], e = m[5], f = m[9];
+  const g = m[2], h = m[6], i = m[10];
+  const det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+  if (!(Math.abs(det) > 1e-12)) return null;
+  const i00 = (e * i - f * h) / det, i01 = (c * h - b * i) / det, i02 = (b * f - c * e) / det;
+  const i10 = (f * g - d * i) / det, i11 = (a * i - c * g) / det, i12 = (c * d - a * f) / det;
+  const i20 = (d * h - e * g) / det, i21 = (b * g - a * h) / det, i22 = (a * e - b * d) / det;
+  const tx = m[12], ty = m[13], tz = m[14];
+  return [
+    i00, i10, i20, 0,
+    i01, i11, i21, 0,
+    i02, i12, i22, 0,
+    -(i00 * tx + i01 * ty + i02 * tz),
+    -(i10 * tx + i11 * ty + i12 * tz),
+    -(i20 * tx + i21 * ty + i22 * tz), 1,
+  ];
+}
+
+/** Rest-pose world position of a node (fallback when an IBM is singular). */
+function restWorldPos(doc, nodeIdx) {
+  const parents = doc.parents();
+  let m = null;
+  for (let n = nodeIdx; n !== undefined; n = parents.get(n)) {
+    const r = nodeRest(doc.json.nodes[n] || {});
+    const local = r.matrix || mat4FromTRS(r.t, r.r, r.s);
+    m = m ? mat4Mul(local, m) : local;
+  }
+  return m ? [m[12], m[13], m[14]] : [0, 0, 0];
+}
+
+/** Distance from point (px,py,pz) to segment ends[o..o+5] of a packed
+ *  [ax,ay,az,bx,by,bz]* array. */
+function distPointSeg(px, py, pz, ends, o) {
+  const ax = ends[o], ay = ends[o + 1], az = ends[o + 2];
+  let dx = ends[o + 3] - ax, dy = ends[o + 4] - ay, dz = ends[o + 5] - az;
+  const len2 = dx * dx + dy * dy + dz * dz;
+  let t = len2 > 0 ? ((px - ax) * dx + (py - ay) * dy + (pz - az) * dz) / len2 : 0;
+  t = t < 0 ? 0 : t > 1 ? 1 : t;
+  dx = px - (ax + t * dx); dy = py - (ay + t * dy); dz = pz - (az + t * dz);
+  return Math.sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+/**
+ * Per-skin V7 data: bone segments, per-joint bone "stars" and bind-pose
+ * joint positions.
+ *
+ * Segments are parent-joint -> child-joint pairs over the skin's joints,
+ * DROPPING (a) segments whose parent is a top joint (a joint whose node-tree
+ * parent is not itself one of the skin's joints — a Root->Hips "segment"
+ * spans the whole body and is not a limb bone) and (b) segments of
+ * ~zero bind length (twist/helper joints stacked on their parent). Bind
+ * positions come from the inverse of each joint's inverseBindMatrix — the
+ * bind pose is exactly the pose in which every joint delta G*IBM is the
+ * identity, i.e. skinned vertices sit at their raw POSITION.
+ *
+ * star[k] = the segments incident to joint k (to its parent and to each
+ * child), as a packed [ax,ay,az,bx,by,bz]* Float64Array of BIND endpoints —
+ * the bones a vertex weighted to joint k can legitimately claim to wrap.
+ * A joint left with no segments (e.g. the top joint) falls back to its own
+ * bind position as a degenerate point-segment.
+ */
+function limbSkinData(doc, skinIdx, height) {
+  if (!doc._limbSkin) doc._limbSkin = new Map();
+  if (doc._limbSkin.has(skinIdx)) return doc._limbSkin.get(skinIdx);
+  const skin = doc.json.skins[skinIdx];
+  const jointsArr = skin.joints || [];
+  const parents = doc.parents();
+  const ibmAcc = skin.inverseBindMatrices !== undefined ? doc.accessor(skin.inverseBindMatrices) : null;
+  const ibm = jointsArr.map((_, k) =>
+    ibmAcc ? Array.from(ibmAcc.data.slice(k * 16, k * 16 + 16)) : mat4Identity());
+  const bindPos = jointsArr.map((j, k) => mat4AffineInvOrigin(ibm[k]) || restWorldPos(doc, j));
+
+  const idxOf = new Map();
+  jointsArr.forEach((j, k) => { if (!idxOf.has(j)) idxOf.set(j, k); });
+  const isTop = j => {
+    const p = parents.get(j);
+    return p === undefined || !idxOf.has(p);
+  };
+  const eps = Math.max(1e-9, 1e-6 * height);
+  const segs = []; // [parentK, childK] indices into jointsArr
+  const starSegs = jointsArr.map(() => []);
+  for (let k = 0; k < jointsArr.length; k++) {
+    const j = jointsArr[k];
+    const p = parents.get(j);
+    if (p === undefined || !idxOf.has(p)) continue; // j is a top joint
+    if (isTop(p)) continue;                         // segment from the top joint
+    const pk = idxOf.get(p);
+    const a = bindPos[pk], bp = bindPos[k];
+    if (Math.hypot(bp[0] - a[0], bp[1] - a[1], bp[2] - a[2]) < eps) continue; // zero-length
+    segs.push([pk, k]);
+    starSegs[k].push([a, bp]);
+    starSegs[pk].push([a, bp]);
+  }
+  const star = starSegs.map((list, k) => {
+    if (!list.length) list = [[bindPos[k], bindPos[k]]]; // point fallback
+    const packed = new Float64Array(list.length * 6);
+    list.forEach(([a, b], s) => { packed.set(a, s * 6); packed.set(b, s * 6 + 3); });
+    return packed;
+  });
+  const data = { jointsArr, ibm, bindPos, segs, star };
+  doc._limbSkin.set(skinIdx, data);
+  return data;
+}
+
+/**
+ * V7 for one clip: sample the clip like the wave check; at every frame,
+ * measure each skinned vertex against the bone segments of its OWN weighted
+ * joints, each bone carried rigidly by its joint's motion:
+ *
+ *   d_bind(v) = min over weighted joints k of dist(POSITION(v), star(k))
+ *   d_t(v)    = min over weighted joints k of
+ *               dist(delta_k(t)^-1 * skinned(v, t), star(k))
+ *
+ * where delta_k(t) = G_k(t) * IBM_k is joint k's rigid delta from the bind
+ * pose and star(k) its incident BIND bone segments. dist(delta^-1 x, star)
+ * equals the distance from the skinned vertex to the bone carried by the
+ * joint's motion — so geometry rigidly attached to any of its joints keeps
+ * d_t = d_bind EXACTLY, whatever the pose (this is what makes a muzzle or
+ * ear hanging off a leaf joint benign in principle: the joint's FRAME
+ * rotates with it, while a bare bone segment cannot represent that
+ * orientation). Detached or doubled geometry whose skinned motion no bone
+ * explains — a second forearm lagging behind the real one — grows d_t past
+ * its allowance on hundreds of vertices at once.
+ *
+ * Restricting candidates to the vertex's own weighted joints is what stops
+ * detached geometry from "re-anchoring": a paw parked beside a leg it
+ * carries no weight for gets no credit for that proximity.
+ *
+ * See THRESHOLDS.LIMB_* for the pass criteria and their rationale.
+ * Vertices with zero total skin weight are not skinned (they never move)
+ * and are excluded from the counts.
+ */
+function limbIntegrityClip(doc, anim, clipName) {
+  const T = THRESHOLDS;
+  const fail = detail => ({ clip: clipName, ok: false, detail });
+  const height = modelHeight(doc);
+  if (!(height > 0)) return fail('model height is zero — cannot scale thresholds');
+  const pose = buildPoseSampler(doc, anim);
+  if (!(pose.duration > 0)) return fail('clip has zero duration');
+  const times = sampleTimes(pose.duration);
+  const rendered = renderedNodeSet(doc);
+
+  const softBase = T.LIMB_SOFT_BASE_FRAC * height;
+  const softDriftCap = T.LIMB_DRIFT_SOFT_FRAC * height;
+  const hardBase = T.LIMB_HARD_BASE_FRAC * height;
+  const hardDriftCap = T.LIMB_DRIFT_HARD_FRAC * height;
+
+  const distToStar = (star, px, py, pz) => {
+    let best = Infinity;
+    for (let s = 0; s < star.length; s += 6) {
+      const d = distPointSeg(px, py, pz, star, s);
+      if (d < best) best = d;
+    }
+    return best;
+  };
+
+  // Collect skinned primitives with their per-skin bone-star data and
+  // per-vertex bind distances (cached on the doc across clips).
+  if (!doc._limbPrim) doc._limbPrim = new Map();
+  const prims = [];
+  for (const n of rendered) {
+    const node = doc.json.nodes[n];
+    if (!node || node.mesh === undefined || node.skin === undefined) continue;
+    const sd = limbSkinData(doc, node.skin, height);
+    if (!sd.segs.length) {
+      return fail(`skin of node "${doc.nodeName(n)}" has no measurable bone segments ` +
+        '(only top-joint or zero-length segments) — limb integrity cannot be verified');
+    }
+    (doc.json.meshes[node.mesh].primitives || []).forEach((prim, pi) => {
+      const at = prim.attributes || {};
+      if (at.POSITION === undefined || at.JOINTS_0 === undefined || at.WEIGHTS_0 === undefined) return;
+      const key = `${n}/${pi}`;
+      let cached = doc._limbPrim.get(key);
+      if (!cached) {
+        const pos = doc.accessor(at.POSITION);
+        const jnt = doc.accessor(at.JOINTS_0);
+        const wgt = doc.accessor(at.WEIGHTS_0);
+        const nv = pos.count;
+        const dBind = new Float64Array(nv);
+        const domK = new Int32Array(nv);
+        const skinned = new Uint8Array(nv);
+        let skinnedCount = 0;
+        for (let v = 0; v < nv; v++) {
+          let total = 0, dk = -1, dw = -1;
+          for (let c = 0; c < 4; c++) {
+            const w = wgt.data[v * 4 + c];
+            total += w;
+            if (w > dw) { dw = w; dk = jnt.data[v * 4 + c]; }
+          }
+          if (!(total > 0)) continue; // unskinned: never moves
+          skinned[v] = 1; skinnedCount++;
+          domK[v] = dk;
+          const px = pos.data[v * 3], py = pos.data[v * 3 + 1], pz = pos.data[v * 3 + 2];
+          let best = Infinity;
+          for (let c = 0; c < 4; c++) {
+            if (wgt.data[v * 4 + c] === 0) continue;
+            const d = distToStar(sd.star[jnt.data[v * 4 + c]], px, py, pz);
+            if (d < best) best = d;
+          }
+          dBind[v] = best;
+        }
+        cached = { pos, jnt, wgt, nv, dBind, domK, skinned, skinnedCount };
+        doc._limbPrim.set(key, cached);
+      }
+      prims.push({ node: n, sd, ...cached });
+    });
+  }
+  if (!prims.length) return fail('no skinned primitives (POSITION+JOINTS_0+WEIGHTS_0) found');
+  const totalVerts = prims.reduce((a, p) => a + p.skinnedCount, 0);
+  if (!totalVerts) return fail('no vertices carry any skin weight');
+
+  let worstFrame = { ratio: -1, count: 0, t: 0, tally: null };
+  let maxExcess = { units: 0, frac: 0, t: 0, joint: null };
+  let hard = { count: 0, worstUnits: 0, joint: null, t: 0 };
+
+  for (let f = 0; f < times.length; f++) {
+    const g = pose.globalsAt(times[f]);
+    let frameOff = 0;
+    const tally = new Map(); // dominant joint name -> offender count
+    for (const pr of prims) {
+      const { sd } = pr;
+      const nJ = sd.jointsArr.length;
+      const jm = new Array(nJ);   // joint delta G * IBM
+      const jmInv = new Array(nJ);
+      for (let k = 0; k < nJ; k++) {
+        jm[k] = mat4Mul(g[sd.jointsArr[k]], sd.ibm[k]);
+        jmInv[k] = mat4AffineInverse(jm[k]); // null when degenerate (scale 0)
+      }
+      const { pos, jnt, wgt, nv, dBind, domK, skinned } = pr;
+      for (let v = 0; v < nv; v++) {
+        if (!skinned[v]) continue;
+        const p = [pos.data[v * 3], pos.data[v * 3 + 1], pos.data[v * 3 + 2]];
+        let ox = 0, oy = 0, oz = 0;
+        for (let c = 0; c < 4; c++) {
+          const w = wgt.data[v * 4 + c];
+          if (w === 0) continue;
+          const q = mat4TransformPoint(jm[jnt.data[v * 4 + c]], p);
+          ox += w * q[0]; oy += w * q[1]; oz += w * q[2];
+        }
+        const db = dBind[v];
+        const soft = Math.min(db * T.LIMB_SOFT_DBIND_SCALE, db + softDriftCap) + softBase;
+        // d_t: best explanation of the skinned position by any weighted
+        // joint's rigidly-carried bone star (early exit once within soft).
+        let d = Infinity;
+        for (let c = 0; c < 4; c++) {
+          if (wgt.data[v * 4 + c] === 0) continue;
+          const k = jnt.data[v * 4 + c];
+          const inv = jmInv[k];
+          if (!inv) continue;
+          const q = mat4TransformPoint(inv, [ox, oy, oz]);
+          const dk = distToStar(sd.star[k], q[0], q[1], q[2]);
+          if (dk < d) { d = dk; if (d <= soft) break; }
+        }
+        if (d <= soft) continue;
+        frameOff++;
+        const name = doc.nodeName(sd.jointsArr[domK[v]]);
+        tally.set(name, (tally.get(name) || 0) + 1);
+        const excess = d - soft;
+        if (excess > maxExcess.units) {
+          maxExcess = { units: excess, frac: excess / height, t: times[f], joint: name };
+        }
+        const hardCap = Math.min(db * T.LIMB_HARD_DBIND_SCALE, db + hardDriftCap) + hardBase;
+        if (d > hardCap) {
+          hard.count++;
+          if (d - hardCap > hard.worstUnits) hard = { ...hard, worstUnits: d - hardCap, joint: name, t: times[f] };
+        }
+      }
+    }
+    const ratio = frameOff / totalVerts;
+    if (ratio > worstFrame.ratio) worstFrame = { ratio, count: frameOff, t: times[f], tally };
+  }
+
+  const domEntry = worstFrame.tally && worstFrame.tally.size
+    ? [...worstFrame.tally.entries()].sort((a, b) => b[1] - a[1])[0]
+    : null;
+  const okSoft = worstFrame.ratio <= T.LIMB_OFFENDER_RATIO;
+  const okHard = hard.count === 0;
+  return {
+    clip: clipName, ok: okSoft && okHard,
+    worstRatio: worstFrame.ratio, worstCount: worstFrame.count, worstTime: worstFrame.t,
+    totalVerts, samples: times.length,
+    maxExcessFrac: maxExcess.frac, hardCount: hard.count,
+    dominantJoint: domEntry ? domEntry[0] : null,
+    detail: `worst frame t=${worstFrame.t.toFixed(2)}s: ${worstFrame.count} of ${totalVerts} ` +
+      `skinned vertices (${(worstFrame.ratio * 100).toFixed(2)}%) beyond ` +
+      `min(${T.LIMB_SOFT_DBIND_SCALE}x d_bind, d_bind + ${T.LIMB_DRIFT_SOFT_FRAC * 100}% h) + ` +
+      `${T.LIMB_SOFT_BASE_FRAC * 100}% h ` +
+      `(allowed <= ${T.LIMB_OFFENDER_RATIO * 100}%)` +
+      (worstFrame.count
+        ? `, max excess ${(maxExcess.frac * 100).toFixed(2)}% h` +
+          (domEntry ? `, dominant offender joint "${domEntry[0]}" (${domEntry[1]} of ${worstFrame.count})` : '')
+        : '') +
+      `; ${hard.count} vertex-frame(s) past the hard cap ` +
+      `min(${T.LIMB_HARD_DBIND_SCALE}x d_bind, d_bind + ${T.LIMB_DRIFT_HARD_FRAC * 100}% h) + ` +
+      `${T.LIMB_HARD_BASE_FRAC * 100}% h` +
+      (hard.count ? ` (worst +${(hard.worstUnits / height * 100).toFixed(2)}% h on "${hard.joint}" at t=${hard.t.toFixed(2)}s)` : '') +
+      `; ${times.length} frames`,
+  };
+}
+
+/**
+ * V7: limb integrity over EVERY required clip. Geometry that leaves the
+ * bones it wraps — a doubled forearm lobe that stays behind while the real
+ * arm rises, a detached paw parked beside the body — FAILS here even when
+ * its dominant joint is exempt from V3 (the waving arm chain) or its clip
+ * passes every joint-motion check. No joint is exempted by name; regions
+ * legitimately far from every bone are handled in principle: each vertex's
+ * allowance scales with its own bind-pose wrap distance d_bind (capped in
+ * absolute terms — see THRESHOLDS.LIMB_DRIFT_SOFT_FRAC), and each vertex is
+ * measured against its own weighted joints' bones carried by those joints'
+ * rigid motion, so anything that actually rides its bones scores
+ * d_t = d_bind exactly.
+ */
+function checkLimbIntegrity(docs) {
+  const rows = [];
+  let pass = true;
+  for (const group of REQUIRED_CLIPS) {
+    const hit = findClip(docs, group);
+    if (!hit) {
+      rows.push({ clip: group.join('|'), ok: false, detail: 'clip not found' });
+      pass = false;
+      continue;
+    }
+    const r = limbIntegrityClip(hit.doc, hit.anim, hit.clipName);
+    rows.push(r);
+    if (!r.ok) pass = false;
+  }
+  let worst = null;
+  for (const r of rows) {
+    if (r.worstRatio === undefined) continue;
+    if (!worst || r.worstRatio > worst.worstRatio) worst = r;
+  }
+  return {
+    id: 'limbIntegrity',
+    title: `V7 limb integrity: skinned geometry rides its own bones in every clip ` +
+      `(<= ${THRESHOLDS.LIMB_OFFENDER_RATIO * 100}% of vertices past min(1.5x d_bind, d_bind + 3% h) + 3% h, ` +
+      `none past min(2x d_bind, d_bind + 8% h) + 8% h)`,
+    pass,
+    measured: (worst
+      ? `worst clip "${worst.clip}": ${worst.detail}. `
+      : '') + `per clip — ` + rows.map(r => `${r.clip}: ${r.ok ? 'ok' : 'FAIL'}`).join('; '),
+    details: { rows, worstClip: worst ? worst.clip : null },
+  };
+}
+
+
+
 /* ========================================================================== *
  * Layout resolution + top-level validate().
  * ========================================================================== */
@@ -1795,6 +2221,7 @@ export function validate(options = {}) {
   checks.push(guard(() => checkWeightLeakage(docs)));
   checks.push(guard(() => checkLoopSeams(docs)));
   checks.push(guard(() => checkJump(docs)));
+  checks.push(guard(() => checkLimbIntegrity(docs)));
 
   return { ok: checks.every(c => c.pass), layout, files: fileLabels, checks };
 }
@@ -1825,6 +2252,12 @@ function printReport(report) {
       for (const [k, s] of Object.entries(c.details.subChecks)) {
         const b = s.pass ? pass(' ok ') : failc('FAIL');
         console.log(`      [${b}] ${k}: ${s.measured}`);
+      }
+    }
+    if (c.id === 'limbIntegrity' && c.details?.rows) {
+      for (const r of c.details.rows) {
+        const b = r.ok ? pass(' ok ') : failc('FAIL');
+        console.log(`      [${b}] ${r.clip}: ${r.detail}`);
       }
     }
   }

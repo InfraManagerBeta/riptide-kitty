@@ -151,6 +151,13 @@ const BOX_TRIS = [ // 12 triangles over the 8-corner ordering above
  *     'bothArms'      the other arm waves too (V1 fail)
  *     'strain'        a tiny all-body triangle stretches > 1.5x while every
  *                     displacement stays under 3% h (V3 strain fail)
+ *     'doubledLimb'   a detached second "paw" box under the left arm,
+ *                     DOMINATED by the upper-arm joint (V3-exempt) but
+ *                     blended with static joints, so it lags behind and
+ *                     sticks out when the arm raises (V7 fail; every other
+ *                     check passes — the defect the older checks miss)
+ *   articulated: walk swings both arms (loop-closed) and jump tucks them —
+ *                correctly skinned limb articulation in walk/jump (V7 pass)
  */
 export function makeKitty(opts = {}) {
   const {
@@ -163,6 +170,7 @@ export function makeKitty(opts = {}) {
     jumpGrounded = false,
     walkDrift = false,
     wave = 'good',
+    articulated = false,
   } = opts;
 
   const bin = new Bin();
@@ -196,6 +204,15 @@ export function makeKitty(opts = {}) {
   if (wave === 'strain') {
     verts.push([0, 0.5, 0.2], [0.01, 0.5, 0.2], [0, 0.51, 0.2]);
     indicesArr.push(32, 33, 34);
+  }
+  // 'doubledLimb' adds a detached second "paw" box (verts 32-39) hugging the
+  // underside of the left arm's hand end. Its DOMINANT joint is L_Arm (the
+  // upper-arm joint — so V3 exempts it as waving-arm geometry), but the
+  // static co-weights make it lag ~2/3 behind when the arm raises: a doubled
+  // limb that sticks out horizontally while the real arm points up.
+  if (wave === 'doubledLimb') {
+    for (const v of boxVerts(0.62, 1.47, 0, 0.07, 0.05, 0.05)) verts.push(v);
+    for (const t of BOX_TRIS) indicesArr.push(...t.map(i => i + 32));
   }
   if (hugeTriangles) {
     // Degenerate but structurally valid extra triangles to blow the budget.
@@ -237,6 +254,10 @@ export function makeKitty(opts = {}) {
     setW(32, [[1, 1]]);
     setW(33, [[1, 1]]);
     setW(34, [[1, 0.97], [7, 0.03]]); // apex: 3% on L_Hand — moves ~1.8% h
+  }
+  if (wave === 'doubledLimb') {
+    // dominant = L_Arm (6), statics Hips (1) + Spine (2) sum to 0.66:
+    for (let v = 32; v < 40; v++) setW(v, [[6, 0.34], [1, 0.33], [2, 0.33]]);
   }
 
   const posMin = [Infinity, Infinity, Infinity], posMax = [-Infinity, -Infinity, -Infinity];
@@ -338,6 +359,7 @@ export function makeKitty(opts = {}) {
       case 'codeform':       // geometry-side failure; the clip is a good wave
       case 'headLeak':       // ditto
       case 'strain':         // ditto
+      case 'doubledLimb':    // ditto — the phantom paw is pure geometry
         ch.push(armProfile(NODE.L_Arm, GOOD));
         break;
       case 'goodRight':
@@ -386,17 +408,30 @@ export function makeKitty(opts = {}) {
       addClip('wave', waveChannels());
     } else if (clip === 'jump' && !jumpGrounded) {
       // A real jump: the hips (and with them the feet) leave the ground.
-      addClip('jump', [{
+      const jumpCh = [{
         node: NODE.Hips, path: 'translation',
         times: [0, 0.4, 0.8],
         values: [[0, 1, 0], [0, 1.35, 0], [0, 1, 0]], // +0.35 ~ 19% of height
-      }]);
+      }];
+      if (articulated) {
+        // ... and the correctly skinned arms tuck in and back out.
+        jumpCh.push(armProfile(NODE.L_Arm, [0, 40, 0], 0.8));
+        jumpCh.push(armProfile(NODE.R_Arm, [0, -40, 0], 0.8));
+      }
+      addClip('jump', jumpCh);
     } else if (clip === 'walk' && walkDrift) {
       // V5: the hips translate away and the clip ends off its start value.
       addClip(name, [{
         node: NODE.Hips, path: 'translation',
         times: [0, 1], values: [[0, 1, 0], [0.35, 1, 0]],
       }]);
+    } else if (clip === 'walk' && articulated) {
+      // Correctly skinned limb articulation: both arms swing opposite ways
+      // and the loop closes where it starts (V5).
+      addClip(name, [
+        armProfile(NODE.L_Arm, [0, 25, 0, -25, 0], 1),
+        armProfile(NODE.R_Arm, [0, -25, 0, 25, 0], 1),
+      ]);
     } else {
       trivialClip(name); // includes jumpGrounded: feet never rise
     }
@@ -722,4 +757,57 @@ test('FAILS wave V3: body-triangle stretch (edge strain) even when every displac
   assert.equal(sc.edgeStrain.pass, false, sc.edgeStrain.measured);
   assert.ok(sc.edgeStrain.maxRatio > THRESHOLDS.BODY_EDGE_STRAIN_MAX_RATIO, `ratio ${sc.edgeStrain.maxRatio}`);
   assert.equal(report.ok, false);
+});
+
+/* ========================================================================== *
+ * Tests — V7 limb integrity (fix round 2).
+ * ========================================================================== */
+
+test('V7 FAILS: doubled limb — a detached second paw dominated by the upper-arm joint sticks out when the arm raises, and every OTHER check passes', () => {
+  const report = validate({ files: { single: makeKitty({ wave: 'doubledLimb' }) } });
+  // The defect the older checks miss: everything else is green...
+  for (const c of report.checks) {
+    if (c.id === 'limbIntegrity') continue;
+    assert.equal(c.pass, true, `${c.id} should pass: ${c.measured}`);
+  }
+  const sc = subChecks(report);
+  assert.equal(sc.bodyCoDeformation.pass, true,
+    'the phantom is dominated by the waving arm chain, so V3 exempts it: ' + sc.bodyCoDeformation.measured);
+  assert.equal(sc.edgeStrain.pass, true, sc.edgeStrain.measured);
+  // ...but V7 fails it, on the wave clip, blaming the arm joint that
+  // dominates the phantom.
+  const c = check(report, 'limbIntegrity');
+  assert.equal(c.pass, false, c.measured);
+  const rows = Object.fromEntries(c.details.rows.map(r => [r.clip, r]));
+  assert.equal(rows.wave.ok, false, rows.wave.detail);
+  assert.ok(rows.wave.worstRatio > THRESHOLDS.LIMB_OFFENDER_RATIO * 10,
+    `offender ratio ${rows.wave.worstRatio} should dwarf the ${THRESHOLDS.LIMB_OFFENDER_RATIO} budget`);
+  assert.equal(rows.wave.dominantJoint, 'L_Arm', rows.wave.detail);
+  assert.ok(rows.idle.ok && rows.jump.ok && rows.walk.ok,
+    'the phantom moves rigidly with the skeleton in the other clips: ' + c.measured);
+  assert.equal(report.ok, false);
+});
+
+test('V7 PASSES: the correct fixture keeps every clip clean', () => {
+  const report = validate({ files: { single: makeKitty() } });
+  const c = check(report, 'limbIntegrity');
+  assert.equal(c.pass, true, c.measured);
+  assert.equal(c.details.rows.length, 4);
+  for (const r of c.details.rows) {
+    assert.equal(r.ok, true, `${r.clip}: ${r.detail}`);
+    assert.equal(r.worstCount, 0, `${r.clip} should have zero offenders: ${r.detail}`);
+  }
+  assert.equal(report.ok, true);
+});
+
+test('V7 PASSES: correctly skinned limbs articulating in walk and jump', () => {
+  const report = validate({ files: { single: makeKitty({ articulated: true }) } });
+  const c = check(report, 'limbIntegrity');
+  assert.equal(c.pass, true, c.measured);
+  const rows = Object.fromEntries(c.details.rows.map(r => [r.clip, r]));
+  assert.equal(rows.walk.worstCount, 0, `swinging arms ride their bones: ${rows.walk.detail}`);
+  assert.equal(rows.jump.worstCount, 0, `tucking arms ride their bones: ${rows.jump.detail}`);
+  // the whole fixture stays green (the articulation breaks no other check):
+  assert.equal(report.ok, true,
+    JSON.stringify(report.checks.filter(x => !x.pass).map(x => [x.id, x.measured])));
 });
