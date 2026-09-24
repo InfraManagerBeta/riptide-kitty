@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Riptide Kitty — preview</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #14161c; color: #e8e8ee;
+               font: 14px/1.4 system-ui, -apple-system, Segoe UI, sans-serif; overflow: hidden; }
+  #app { position: fixed; inset: 0; }
+  canvas { display: block; }
+  #clips {
+    position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%);
+    display: flex; gap: 8px; padding: 8px; border-radius: 12px;
+    background: rgba(20, 22, 28, .75); backdrop-filter: blur(6px);
+    border: 1px solid rgba(255,255,255,.12);
+  }
+  #clips button {
+    font: inherit; color: #e8e8ee; background: rgba(255,255,255,.06);
+    border: 1px solid rgba(255,255,255,.14); border-radius: 8px;
+    padding: 7px 16px; cursor: pointer; text-transform: capitalize;
+  }
+  #clips button:hover { background: rgba(255,255,255,.14); }
+  #clips button.active {
+    background: #3f8cff; border-color: #3f8cff; color: #fff; font-weight: 600;
+  }
+  #clips button:disabled { opacity: .35; cursor: default; }
+  #overlay {
+    position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    flex-direction: column; gap: 10px; background: rgba(20,22,28,.92); text-align: center;
+    padding: 24px; white-space: pre-wrap;
+  }
+  #overlay.hidden { display: none; }
+  #overlay .spin {
+    width: 28px; height: 28px; border-radius: 50%;
+    border: 3px solid rgba(255,255,255,.15); border-top-color: #3f8cff;
+    animation: spin 0.9s linear infinite;
+  }
+  #overlay.error .spin { display: none; }
+  #overlay.error #overlay-msg { color: #ff8080; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #hint { position: fixed; top: 12px; left: 14px; opacity: .55; font-size: 12px; }
+</style>
+<!-- three.js pinned exactly: 0.160.1 (build + examples/jsm from the same version) -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.1/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.1/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<div id="app"></div>
+<div id="hint">Riptide Kitty — drag to orbit, wheel to zoom</div>
+<div id="clips" hidden></div>
+<div id="overlay"><div class="spin"></div><div id="overlay-msg">Loading kitty…</div></div>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* ---------------------------------------------------------------- config */
+// Paths are relative to /preview/ so the page works served statically from
+// the repository root (GitHub Pages: /preview/index.html + /assets/...).
+const SINGLE = '../assets/kitty/kitty.glb';
+const MULTI = {
+  idle: ['../assets/kitty/kitty-idle.glb'],
+  jump: ['../assets/kitty/kitty-jump.glb'],
+  walk: ['../assets/kitty/kitty-walk.glb', '../assets/kitty/kitty-run.glb'],
+  wave: ['../assets/kitty/kitty-wave.glb'],
+};
+const CANONICAL = ['idle', 'jump', 'walk', 'wave'];
+const CLIP_ALIASES = { idle: ['idle'], jump: ['jump'], walk: ['walk', 'run'], wave: ['wave'] };
+const CROSSFADE_S = 0.35;
+
+const overlay = document.getElementById('overlay');
+const overlayMsg = document.getElementById('overlay-msg');
+const clipBar = document.getElementById('clips');
+const setLoading = msg => { overlay.classList.remove('hidden', 'error'); overlayMsg.textContent = msg; };
+const setError = msg => { overlay.classList.remove('hidden'); overlay.classList.add('error'); overlayMsg.textContent = msg; };
+const clearOverlay = () => overlay.classList.add('hidden');
+
+/* ---------------------------------------------------------------- scene */
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+document.getElementById('app').appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x14161c);
+const camera = new THREE.PerspectiveCamera(40, innerWidth / innerHeight, 0.01, 100);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+
+scene.add(new THREE.HemisphereLight(0xbfd4ff, 0x51422e, 1.1));
+const key = new THREE.DirectionalLight(0xffffff, 2.2); key.position.set(2.5, 4, 3); scene.add(key);
+const fill = new THREE.DirectionalLight(0x88aaff, 0.7); fill.position.set(-3, 2, -2.5); scene.add(fill);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ---------------------------------------------------------------- loading */
+const loader = new GLTFLoader();
+
+async function fetchGLB(url) {
+  const res = await fetch(url, { cache: 'no-cache' });
+  if (!res.ok) throw new Error(`${url}: HTTP ${res.status}`);
+  return res.arrayBuffer();
+}
+const parseGLB = buf => new Promise((ok, err) => loader.parse(buf, '', ok, e => err(new Error(`GLTF parse failed: ${e?.message || e}`))));
+
+function pickClip(animations, canonical) {
+  for (const alias of CLIP_ALIASES[canonical]) {
+    const hit = animations.find(a => a.name === alias);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+/** Returns { root, clips: Map<canonical, AnimationClip>, source } */
+async function loadKitty() {
+  // Preferred: the single merged GLB.
+  try {
+    setLoading(`Loading ${SINGLE} …`);
+    const gltf = await parseGLB(await fetchGLB(SINGLE));
+    const clips = new Map();
+    for (const c of CANONICAL) {
+      const clip = pickClip(gltf.animations || [], c);
+      if (clip) clips.set(c, clip);
+    }
+    if (!clips.size) throw new Error(`kitty.glb loaded but carries none of the expected clips (found: ${(gltf.animations || []).map(a => a.name).join(', ') || 'none'})`);
+    return { root: gltf.scene, clips, source: 'kitty.glb' };
+  } catch (singleErr) {
+    // Fallback: the spec-allowed four-file layout.
+    setLoading(`kitty.glb not available (${singleErr.message})\nTrying the four-file layout …`);
+    const errors = [`single-file: ${singleErr.message}`];
+    let root = null;
+    const clips = new Map();
+    for (const c of CANONICAL) {
+      let loaded = null, lastErr = null;
+      for (const url of MULTI[c]) {
+        try { loaded = await parseGLB(await fetchGLB(url)); break; }
+        catch (e) { lastErr = e; }
+      }
+      if (!loaded) { errors.push(`${c}: ${lastErr.message}`); continue; }
+      if (!root) root = loaded.scene;
+      // Same rig across files -> clips retarget by node name automatically.
+      const clip = pickClip(loaded.animations || [], c) || (loaded.animations || [])[0];
+      if (clip) clips.set(c, clip);
+      else errors.push(`${c}: file loaded but contains no animation`);
+    }
+    if (!root || !clips.size) {
+      throw new Error(`Could not load the kitty asset.\n${errors.join('\n')}\n` +
+        `Expected ../assets/kitty/kitty.glb or the four-file layout.`);
+    }
+    return { root, clips, source: 'four-file layout' };
+  }
+}
+
+/* ---------------------------------------------------------------- boot */
+let mixer = null, actions = new Map(), currentName = null;
+
+function frameObject(obj) {
+  const box = new THREE.Box3().setFromObject(obj);
+  const size = box.getSize(new THREE.Vector3());
+  const center = box.getCenter(new THREE.Vector3());
+  const radius = Math.max(size.x, size.y, size.z) * 0.5 || 1;
+  controls.target.copy(center);
+  camera.position.set(center.x + radius * 1.6, center.y + radius * 0.9, center.z + radius * 2.6);
+  camera.near = radius / 100;
+  camera.far = radius * 100;
+  camera.updateProjectionMatrix();
+  controls.update();
+}
+
+function play(name) {
+  const next = actions.get(name);
+  if (!next) { console.warn(`[kitty] no clip "${name}"`); return false; }
+  if (name === currentName) return true;
+  const prev = currentName ? actions.get(currentName) : null;
+  next.reset().setEffectiveWeight(1).fadeIn(CROSSFADE_S).play();
+  if (prev) prev.fadeOut(CROSSFADE_S);
+  currentName = name;
+  for (const btn of clipBar.querySelectorAll('button')) {
+    btn.classList.toggle('active', btn.dataset.clip === name);
+  }
+  return true;
+}
+
+try {
+  const { root, clips, source } = await loadKitty();
+  scene.add(root);
+  frameObject(root);
+
+  mixer = new THREE.AnimationMixer(root);
+  for (const [name, clip] of clips) {
+    const a = mixer.clipAction(clip);
+    a.setLoop(THREE.LoopRepeat, Infinity);
+    actions.set(name, a);
+  }
+
+  // Clip switcher: one button per expected clip, labelled with the clip
+  // name; missing clips render disabled so the gap is visible.
+  clipBar.hidden = false;
+  for (const c of CANONICAL) {
+    const btn = document.createElement('button');
+    const actual = clips.get(c);
+    btn.dataset.clip = c;
+    btn.textContent = c === 'walk' && actual ? actual.name : c; // shows "run" if that's the real name
+    btn.disabled = !actual;
+    btn.title = actual ? `play "${actual.name}"` : `clip missing from asset`;
+    btn.addEventListener('click', () => play(c));
+    clipBar.appendChild(btn);
+  }
+
+  // idle autoplays and loops.
+  play(clips.has('idle') ? 'idle' : clips.keys().next().value);
+  console.info(`[kitty] loaded from ${source}; clips: ${[...clips.keys()].join(', ')}`);
+  clearOverlay();
+
+  // Automation hook for playtests.
+  window.__kitty = {
+    clips: [...clips.keys()],
+    play,
+    get current() { return currentName; },
+  };
+} catch (e) {
+  setError(`Failed to load the kitty.\n\n${e.message}`);
+  console.error(e);
+}
+
+const clock = new THREE.Clock();
+renderer.setAnimationLoop(() => {
+  if (mixer) mixer.update(clock.getDelta());
+  controls.update();
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>
