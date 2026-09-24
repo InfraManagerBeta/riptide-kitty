@@ -21,7 +21,7 @@
     "triangle_budget": {
       "pass": true,
       "detail": {
-        "rendered_triangles": 13039,
+        "rendered_triangles": 13207,
         "max": 20000
       }
     },
@@ -30,7 +30,7 @@
       "detail": {
         "textures": [
           {
-            "name": "Color_e23f40e6-9c18-46ea-aa58-9639b96fda57",
+            "name": "Color_6cad8472-58f6-4117-81a6-195acd0bbb05",
             "size": [
               2048,
               2048
@@ -43,7 +43,7 @@
     "V4_weight_leakage": {
       "pass": true,
       "detail": {
-        "head_neck_dominant_vertices": 5757,
+        "head_neck_dominant_vertices": 7074,
         "leaking_vertices": 0,
         "max_arm_weight_on_head_neck": 0.0
       }
@@ -59,10 +59,10 @@
       "pass": true,
       "detail": {
         "rise_pct_height_by_joint": {
-          "LeftFoot": 14.70486008214541,
-          "LeftToeBase": 14.70486008214541,
-          "RightFoot": 14.704860082145407,
-          "RightToeBase": 14.704860082145407
+          "LeftFoot": 14.704861635080704,
+          "LeftToeBase": 14.704861635080704,
+          "RightFoot": 14.704861635080716,
+          "RightToeBase": 14.704861635080718
         },
         "threshold_pct": 8.0
       }
@@ -71,14 +71,14 @@
       "pass": true,
       "detail": {
         "waving_side": "right",
-        "peak_deg": 119.99999846421777,
+        "peak_deg": 120.00000018455498,
         "min": 45.0
       }
     },
     "V1_wave_hand_above_shoulder": {
       "pass": true,
       "detail": {
-        "clearance_pct_height": 22.51238607945494,
+        "clearance_pct_height": 13.536599609701906,
         "min_pct": 5.0
       }
     },
@@ -93,52 +93,52 @@
       "pass": true,
       "detail": {
         "resting_side": "left",
-        "peak_deg": 0.0,
+        "peak_deg": 1.2074182697257333e-06,
         "max": 15.0
       }
     },
     "V2_root_hips_translation": {
       "pass": true,
       "detail": {
-        "max_range_pct_height": 7.0912412383557474e-15,
+        "max_range_pct_height": 7.363762829161328e-15,
         "max_allowed_pct": 5.0
       }
     },
     "V2_torso_rotation": {
       "pass": true,
       "detail": {
-        "max_rot_deg": 1.7075472925031877e-06,
+        "max_rot_deg": 1.2074182697257333e-06,
         "max_allowed_deg": 15.0
       }
     },
     "V3_co_deformation_displacement": {
       "pass": true,
       "detail": {
-        "non_waving_vertex_count": 10685,
-        "frac_over_3pct_height": 0.009358914365933552,
+        "non_waving_vertex_count": 11718,
+        "frac_over_3pct_height": 0.0,
         "max_allowed_frac_pct": 0.5,
-        "abs_max_disp_pct_height": 3.361642667524034,
+        "abs_max_disp_pct_height": 4.019855282390694e-14,
         "abs_max_allowed_pct": 8.0
       }
     },
     "V3_edge_stretch": {
       "pass": true,
       "detail": {
-        "max_edge_stretch": 1.3634944446592363,
+        "max_edge_stretch": 1.0000000000001161,
         "max_allowed": 1.5,
-        "worst_frame_t": 0.5333333412806193
+        "worst_frame_t": 0.06666666766007741
       }
     }
   },
-  "model_height": 0.9785161258335862,
+  "model_height": 0.9863281348925028,
   "wave_summary": {
     "waving_side": "right",
     "resting_side": "left",
     "arm_peak_rotation_deg": {
-      "left": 0.0,
-      "right": 119.99999846421777
+      "left": 1.2074182697257333e-06,
+      "right": 120.00000018455498
     },
-    "hand_clearance_above_shoulder_pct_height": 22.51238607945494,
+    "hand_clearance_above_shoulder_pct_height": 13.536599609701906,
     "oscillations": 2.5
   },
   "overall_pass": true,
