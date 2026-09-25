@@ -21,12 +21,17 @@
  *   V2 root/hips: EVERY root candidate (top joint, any root|hips|pelvis
  *      joint, topmost joint with an animated translation channel) each
  *      translates <= 5% of model height; torso rotation <= 15 deg
- *   V3 co-deformation (LBS): over ALL vertices NOT dominated by the waving
- *      arm chain (head, tail, legs, other arm INCLUDED) at most 0.5% may
- *      move > 3% h from the clip's first frame and none > 8% h; plus edge
- *      strain <= 1.5x over all-body triangles
+ *   V3' co-deformation (LBS): over ALL vertices OUTSIDE the waving arm's
+ *      GEOMETRIC limb volume fixed at BIND (the limb side of the plane
+ *      through the upper-arm joint perpendicular to the upper-arm bone,
+ *      within 12% h of the arm's bind bone chain) — membership can NOT be
+ *      changed by re-pointing weights; at most 0.5% may move > 3% h from
+ *      the clip's first frame and none > 8% h
  *   V4 weight leakage: ZERO head/neck-dominated vertices carry > 0.2 total
  *      arm-chain weight (either arm)
+ *   V4' reverse leakage: ZERO vertices DOMINATED by an arm-chain joint
+ *      (clavicle included) inside the geometric head region (bind height
+ *      above the topmost neck joint, within 45% h of the head bone star)
  *   V5 loop seams: `idle` and `walk`/`run` channels end where they start
  *      (<= 1% h translation / <= 2 deg rotation)
  *   V6 jump: at some frame every foot joint rises >= 8% h above its
@@ -40,7 +45,20 @@
  *      min(1.5 * d_bind, d_bind + 3% h) + 3% h at any frame and none may
  *      exceed min(2 * d_bind, d_bind + 8% h) + 8% h (catches detached /
  *      doubled limb geometry riding along with a bone chain even when its
- *      dominant joint is exempt from V3)
+ *      dominant joint is exempt from V3')
+ *   V7' mis-binding at BIND: V7 is invariant by construction for rigid
+ *      single-joint binds (d_t = d_bind), so the BINDING itself is judged:
+ *      <= 0.2% of vertices may be bound only to bones > 10% h away while
+ *      another bone is < 10% h away and 2.5x closer; ZERO influences
+ *      >= 0.35 weight bound > 20% h from their bones under the same
+ *      nearness/dominance; every skin joint's scale (rest + animated) = 1
+ *      within 0.05 per component
+ *   V8 edge strain over ALL edges (no exemption for arm-touching
+ *      triangles), in EVERY clip, vs BIND and vs the clip's first frame:
+ *      <= 0.5% of edges past 1.5x (2x inside a limb volume), none past 3x
+ *      (4x limb) and none opening > 3% h in absolute length
+ *   V9 seam cracks: vertices co-located within 1e-5 at bind (UV-seam
+ *      duplicates) stay within 0.5% h of each other in every clip
  *
  * Node >= 20, ESM, ZERO runtime dependencies: the GLB container, glTF JSON,
  * accessors (incl. sparse, interleaved, normalized), animation samplers
@@ -138,11 +156,6 @@ export const THRESHOLDS = {
   /** V3. Hard displacement cap: NO non-waving-arm vertex may move more than
    *  this fraction of model height. */
   BODY_DISPLACEMENT_HARD_FRAC: 0.08,
-  /** V3. Maximum edge-length ratio vs the clip's first frame over triangles
-   *  whose three vertices are all non-waving-arm-dominated (catches skin
-   *  STRETCHING between a dragged pocket and its static surroundings even
-   *  when absolute displacements stay small). */
-  BODY_EDGE_STRAIN_MAX_RATIO: 1.5,
 
   /** V4. Maximum total arm-chain weight (either arm, summed over the 4
    *  influences) on a vertex whose DOMINANT joint is a head/neck joint.
@@ -209,6 +222,114 @@ export const THRESHOLDS = {
   LIMB_DRIFT_HARD_FRAC: 0.08,
   /** V7. Hard cap absolute part (fraction of model height). */
   LIMB_HARD_BASE_FRAC: 0.08,
+
+  /* --- fix round 3: V3' geometric limb volume ---------------------------- */
+
+  /** V3'/V8. Radius of the GEOMETRIC arm-limb volume, as a fraction of model
+   *  height. A vertex belongs to an arm limb only if it (a) lies on the limb
+   *  side of the plane through the upper-arm joint perpendicular to the
+   *  upper-arm bone AND (b) is within this radius of the arm's bone chain
+   *  (upper arm -> hand, bind pose). Set in principle: a chubby cartoon
+   *  biped's arm (paw included) is at most ~12% of body height thick around
+   *  its bones; anything farther out is torso/head/tail skin whatever its
+   *  weights say. V3 previously classified "arm" by CURRENT dominant joint,
+   *  so re-pointing torso vertices at the waving arm removed them from the
+   *  co-deformation check (both round-3 probes proved it: a belly slab
+   *  100% on RightArm PASSED). Geometry at bind cannot be re-pointed. */
+  LIMB_RADIUS_FRAC: 0.12,
+
+  /* --- fix round 3: V8 all-edge strain ------------------------------------ */
+
+  /** V8. Soft edge-length ratio for edges NOT wholly inside a limb volume:
+   *  an edge stretched past this (vs bind OR vs the clip's first frame)
+   *  counts as an offender. Same 1.5x as the old V3 strain — but over ALL
+   *  edges: the old check dropped every triangle touching a waving-arm
+   *  vertex, which is exactly where the arm/torso boundary tears. */
+  EDGE_SOFT_RATIO_BODY: 1.5,
+  /** V8. Soft ratio for edges wholly INSIDE a limb volume. Looser because
+   *  elbow/shoulder creases legitimately stretch compressed skin when the
+   *  limb bends (crease edges are short and sit in the fold). */
+  EDGE_SOFT_RATIO_LIMB: 2.0,
+  /** V8. Maximum fraction of ALL edges (per clip) that may exceed their
+   *  soft ratio. 0.5% tolerates isolated crease/noise edges; a torn
+   *  boundary ring (dozens to hundreds of edges) is far past it. */
+  EDGE_OFFENDER_RATIO: 0.005,
+  /** V8. Hard ratio cap for non-limb edges: NO edge may stretch past this
+   *  (vs bind or clip start). 3x skin stretch is visible shredding. */
+  EDGE_HARD_RATIO_BODY: 3.0,
+  /** V8. Hard ratio cap for edges wholly inside a limb volume (justified:
+   *  a fully-flexed elbow can triple a fold edge; 4x cannot be a fold). */
+  EDGE_HARD_RATIO_LIMB: 4.0,
+  /** V8. Absolute opening cap: NO edge may grow LONGER than its baseline
+   *  by more than this fraction of model height (vs bind or clip start) —
+   *  a 3% h gap is a visible crack whatever the ratio. */
+  EDGE_ABS_OPEN_FRAC: 0.03,
+  /** V8. Noise floor: a ratio offense only counts when the edge also opens
+   *  by at least this fraction of model height. A 0.05% h edge stretching
+   *  2x moved by half a pixel — sub-visible micro-edges must not dominate
+   *  a ratio metric. The absolute cap above is independent of the floor. */
+  EDGE_MIN_OPEN_FRAC: 0.002,
+
+  /* --- fix round 3: V9 seam cracks ---------------------------------------- */
+
+  /** V9. Weld epsilon (MODEL UNITS, absolute per the work order): vertices
+   *  whose bind positions are within this distance are one weld group
+   *  (UV/normal seams duplicate vertices at identical positions). */
+  SEAM_WELD_EPS: 1e-5,
+  /** V9. Maximum intra-group separation (fraction of model height) at any
+   *  sampled frame of any clip. Duplicates with different weights split
+   *  when their joints move apart — a visible crack along the UV seam.
+   *  0.5% h is sub-pixel at preview scale; the probe found seams opening
+   *  up to 5% h. */
+  SEAM_MAX_SEPARATION_FRAC: 0.005,
+
+  /* --- fix round 3: V4' reverse leakage ----------------------------------- */
+
+  /** V4'. Radius (fraction of model height) around the head joints' bind
+   *  bone star that, combined with "bind height above the topmost neck
+   *  joint", defines the GEOMETRIC head region. Generous by principle: this
+   *  cartoon head (cheek tufts included) is roughly the top half of the
+   *  model; the neck-height gate is what excludes shoulders. ZERO vertices
+   *  in this region may be DOMINATED by an arm-chain joint (clavicle/
+   *  shoulder included): V4 only tested head-DOMINATED vertices, so
+   *  RightShoulder owning 393 cheek/head vertices passed. */
+  HEAD_REGION_RADIUS_FRAC: 0.45,
+
+  /* --- fix round 3: V7' bind-time mis-binding ----------------------------- */
+
+  /** V7'. A vertex is mis-bound (soft offender) when the bone stars of ALL
+   *  its weighted joints are farther than this fraction of model height ... */
+  MISBIND_OWN_FAR_FRAC: 0.10,
+  /** V7'. ... while some OTHER bone segment is within this fraction of
+   *  model height of the vertex ... */
+  MISBIND_OTHER_NEAR_FRAC: 0.10,
+  /** V7'. ... and the nearest other bone explains the vertex at least this
+   *  many times better (dOwn > factor * dNearest). The factor is what keeps
+   *  legitimately-far skin safe: for a muzzle/ear/belly vertex the nearest
+   *  bone IS its own bone, so dOwn = dNearest and the test cannot fire.
+   *  V7 is invariant BY CONSTRUCTION for any vertex bound 100% to one
+   *  joint (skinned = delta_k * v_bind, so d_t = d_bind at every frame) —
+   *  both probes proved rigid rebinds of a paw to Hips/Spine2 PASS V7.
+   *  Mis-binding must therefore be caught AT BIND, geometrically. */
+  MISBIND_DOMINANCE: 2.5,
+  /** V7'. Maximum fraction of skinned vertices that may be soft offenders. */
+  MISBIND_OFFENDER_RATIO: 0.002,
+  /** V7'. Hard offender: ANY single influence carrying at least this much
+   *  weight ... */
+  MISBIND_HARD_WEIGHT: 0.35,
+  /** V7'. ... whose own bone star is farther than this fraction of model
+   *  height while the vertex sits within MISBIND_OTHER_NEAR_FRAC of some
+   *  other bone (with the same dominance factor). Catches small BLENDED
+   *  fragments (e.g. 20 paw vertices 0.55 Hand / 0.45 Spine2) that stay
+   *  under the soft ratio because their dominant bone is nearby. ZERO hard
+   *  offenders allowed. */
+  MISBIND_HARD_FAR_FRAC: 0.20,
+  /** V7'. Limb-scale sanity: every skin joint's scale — rest pose and every
+   *  animated scale sample in every clip — must be 1 within this tolerance
+   *  per component. A joint animated (or posed) at scale 1.6 balloons its
+   *  geometry while V7's rigid-delta transport stays invariant (proven:
+   *  RightForeArm scaled 1.6x PASSED V7). */
+  JOINT_SCALE_TOL: 0.05,
 };
 
 /**
@@ -591,6 +712,8 @@ function classifyJoints(doc) {
 
   const armChains = { left: new Set(), right: new Set(), unsided: new Set() };
   const headNeck = new Set();
+  const headSeeds = new Set(); // joints whose OWN name matches the head patterns
+  const neckSeeds = new Set(); // joints whose OWN name matches the neck patterns
   const torso = new Set();
   const feet = new Set();
   const rootNamed = new Set();
@@ -602,6 +725,8 @@ function classifyJoints(doc) {
       const side = sideOfName(name) || 'unsided';
       for (const d of descendantsWithin(j)) armChains[side].add(d);
     }
+    if (matchesCategory(name, JOINT_NAME_PATTERNS.head)) headSeeds.add(j);
+    if (matchesCategory(name, JOINT_NAME_PATTERNS.neck)) neckSeeds.add(j);
     if (matchesCategory(name, JOINT_NAME_PATTERNS.head) || matchesCategory(name, JOINT_NAME_PATTERNS.neck)) {
       for (const d of descendantsWithin(j)) headNeck.add(d);
     }
@@ -625,21 +750,15 @@ function classifyJoints(doc) {
   }
 
   const armAll = new Set([...armChains.left, ...armChains.right, ...armChains.unsided]);
-  return { joints, armChains, armAll, headNeck, torso, feet, rootNamed, topJoint, depth };
+  return { joints, armChains, armAll, headNeck, headSeeds, neckSeeds, torso, feet, rootNamed, topJoint, depth };
 }
 
 /**
- * The joints V3 exempts from the co-deformation set: the WAVING arm chain
- * minus its shoulder/clavicle-named joints (see JOINT_NAME_PATTERNS.shoulder
- * — shoulder-dominated chest/flank skin must stay accountable).
+ * The joints V3' does NOT accept as "upper arm" when deriving the geometric
+ * limb volume: shoulder/clavicle-named joints belong to the torso girdle
+ * (see JOINT_NAME_PATTERNS.shoulder — shoulder-dominated chest/flank skin
+ * must stay accountable to the body checks; reviewer A3).
  */
-function wavingArmCoreSet(doc, chain) {
-  const core = new Set();
-  for (const j of chain) {
-    if (!matchesCategory(doc.nodeName(j), JOINT_NAME_PATTERNS.shoulder)) core.add(j);
-  }
-  return core;
-}
 
 /* ========================================================================== *
  * Animation sampling (STEP / LINEAR / CUBICSPLINE per glTF 2.0).
@@ -859,6 +978,7 @@ function countTriangles(doc) {
  * are defined in mesh space per the glTF skinning equations).
  */
 function modelHeight(doc) {
+  if (doc._modelHeight !== undefined) return doc._modelHeight;
   const rendered = renderedNodeSet(doc);
   let min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
   for (const n of rendered) {
@@ -886,9 +1006,9 @@ function modelHeight(doc) {
       }
     }
   }
-  if (min[0] === Infinity) return 0;
+  if (min[0] === Infinity) return (doc._modelHeight = 0);
   const ext = [max[0] - min[0], max[1] - min[1], max[2] - min[2]];
-  return ext[1] > 1e-9 ? ext[1] : Math.max(...ext);
+  return (doc._modelHeight = ext[1] > 1e-9 ? ext[1] : Math.max(...ext));
 }
 
 /* ========================================================================== *
@@ -1371,21 +1491,25 @@ function checkWaveArm(docs) {
     };
   }
 
-  // --- V3: co-deformation via linear blend skinning, over ALL vertices NOT
-  // dominated by the waving arm chain (head, tail, legs, the other arm
-  // INCLUDED — reviewer A2/A3: excluding head-dominated vertices or judging
-  // by p95 let visibly dragged faces and torso pockets pass). Shoulder/
-  // clavicle joints do NOT count as "waving arm" here (see
-  // wavingArmCoreSet). Plus edge strain over all-body triangles.
+  // --- V3': co-deformation via linear blend skinning, over ALL vertices
+  // OUTSIDE the waving arm's GEOMETRIC limb volume, fixed at BIND (head,
+  // tail, legs, the other arm, and — crucially — any torso vertex whose
+  // WEIGHTS were re-pointed at the arm: round-3 probes proved that
+  // classifying by current dominant joint let a belly slab bound 100% to
+  // RightArm escape the check entirely; geometry cannot be re-pointed).
+  // A vertex is limb only if it lies on the limb side of the plane through
+  // the upper-arm joint perpendicular to the upper-arm bone AND within
+  // LIMB_RADIUS_FRAC*h of the arm's bind bone chain (see limbVolumes).
+  // Edge strain moved to V8 (all edges, every clip, vs bind AND clip
+  // start); the wave clip's V8 verdict is surfaced here as a sub-check.
   {
-    const wavingCore = wavingArmCoreSet(doc, winningChain);
+    const vol = limbVolumes(doc)[best.side] || null;
     let bodyVertexCount = 0;
+    let limbVertexCount = 0;
     let over3Count = 0;
     let maxDisp = { units: 0, frac: 0, node: null, vert: -1 };
-    let strain = { maxRatio: 1, node: null, baseLen: 0 };
     let over3Example = null;
     let skinnedPrims = 0;
-    let bodyEdgeCount = 0, bodyTriCount = 0;
     const soft = THRESHOLDS.BODY_DISPLACEMENT_SOFT_FRAC * height;
     const rendered = renderedNodeSet(doc);
 
@@ -1401,10 +1525,6 @@ function checkWaveArm(docs) {
       });
       // Per frame: jointMat[k] = G[joint k] * IBM[k]
       const jointMats = globalsPerFrame.map(g => jointsArr.map((j, k) => mat4Mul(g[j], ibm[k])));
-      const isBodyJoint = k => {
-        const j = jointsArr[k];
-        return j !== undefined && !wavingCore.has(j);
-      };
 
       for (const prim of doc.json.meshes[node.mesh].primitives || []) {
         const at = prim.attributes || {};
@@ -1415,47 +1535,23 @@ function checkWaveArm(docs) {
         const wgt = doc.accessor(at.WEIGHTS_0);
         const nv = pos.count;
 
-        // Body vertices: dominant joint not in the waving arm core.
+        // Body vertices: skinned AND outside the waving limb's volume.
         const isBody = new Uint8Array(nv);
         for (let v = 0; v < nv; v++) {
-          let domK = -1, domW = -1;
-          for (let c = 0; c < 4; c++) {
-            const w = wgt.data[v * 4 + c];
-            if (w > domW) { domW = w; domK = jnt.data[v * 4 + c]; }
+          let tw = 0;
+          for (let c = 0; c < 4; c++) tw += wgt.data[v * 4 + c];
+          if (!(tw > 0)) continue;
+          if (vol && vol.member(pos.data[v * 3], pos.data[v * 3 + 1], pos.data[v * 3 + 2])) {
+            limbVertexCount++;
+            continue;
           }
-          if (domW > 0 && isBodyJoint(domK)) { isBody[v] = 1; bodyVertexCount++; }
-        }
-
-        // Triangles (for edge strain): only triangles whose three vertices
-        // are ALL body vertices contribute edges.
-        const edges = new Map(); // key a*nv+b (a<b) -> baseLen (filled at f=0)
-        {
-          const idx = prim.indices !== undefined ? doc.accessor(prim.indices).data : null;
-          const count = idx ? idx.length : nv;
-          const mode = prim.mode === undefined ? 4 : prim.mode;
-          const vtx = i => (idx ? idx[i] : i);
-          const pushTri = (a, b, c) => {
-            if (!(isBody[a] && isBody[b] && isBody[c])) return;
-            bodyTriCount++;
-            for (const [p, q] of [[a, b], [b, c], [a, c]]) {
-              const key = p < q ? p * nv + q : q * nv + p;
-              if (!edges.has(key)) edges.set(key, 0);
-            }
-          };
-          if (mode === 4) {
-            for (let i = 0; i + 2 < count; i += 3) pushTri(vtx(i), vtx(i + 1), vtx(i + 2));
-          } else if (mode === 5) {
-            for (let i = 0; i + 2 < count; i++) pushTri(vtx(i), vtx(i + 1), vtx(i + 2));
-          } else if (mode === 6) {
-            for (let i = 1; i + 1 < count; i++) pushTri(vtx(0), vtx(i), vtx(i + 1));
-          }
-          bodyEdgeCount += edges.size;
+          isBody[v] = 1;
+          bodyVertexCount++;
         }
 
         // Frame loop: skinned positions of body vertices; track per-vertex
-        // max displacement from frame 0 and per-edge max length ratio.
+        // max displacement from frame 0.
         const base = new Float64Array(nv * 3);
-        const cur = new Float64Array(nv * 3);
         const maxD = new Float64Array(nv);
         for (let f = 0; f < nSamples; f++) {
           const jm = jointMats[f];
@@ -1469,23 +1565,12 @@ function checkWaveArm(docs) {
               const q = mat4TransformPoint(jm[jnt.data[v * 4 + c]], p);
               ox += w * q[0]; oy += w * q[1]; oz += w * q[2];
             }
-            cur[v * 3] = ox; cur[v * 3 + 1] = oy; cur[v * 3 + 2] = oz;
             if (f === 0) {
               base[v * 3] = ox; base[v * 3 + 1] = oy; base[v * 3 + 2] = oz;
             } else {
               const d = Math.hypot(ox - base[v * 3], oy - base[v * 3 + 1], oz - base[v * 3 + 2]);
               if (d > maxD[v]) maxD[v] = d;
               if (d > maxDisp.units) maxDisp = { units: d, frac: d / height, node: doc.nodeName(n), vert: v };
-            }
-          }
-          for (const [key, baseLen] of edges) {
-            const a = Math.floor(key / nv), b = key % nv;
-            const len = Math.hypot(
-              cur[a * 3] - cur[b * 3], cur[a * 3 + 1] - cur[b * 3 + 1], cur[a * 3 + 2] - cur[b * 3 + 2]);
-            if (f === 0) edges.set(key, len);
-            else if (baseLen > 1e-9) {
-              const ratio = len / baseLen;
-              if (ratio > strain.maxRatio) strain = { maxRatio: ratio, node: doc.nodeName(n), baseLen };
             }
           }
         }
@@ -1502,31 +1587,36 @@ function checkWaveArm(docs) {
 
     if (!skinnedPrims) {
       sub.bodyCoDeformation = { pass: false, measured: 'no skinned primitives (POSITION+JOINTS_0+WEIGHTS_0) found', over3Frac: null };
-      sub.edgeStrain = { pass: false, measured: 'no skinned primitives found', maxRatio: null };
     } else if (!bodyVertexCount) {
-      sub.bodyCoDeformation = { pass: false, measured: 'no vertices dominated by a non-waving-arm joint found — cannot verify body stability', over3Frac: null };
-      sub.edgeStrain = { pass: false, measured: 'no body vertices found', maxRatio: null };
+      sub.bodyCoDeformation = { pass: false, measured: 'no skinned vertices outside the waving limb volume — cannot verify body stability', over3Frac: null };
     } else {
       const over3Frac = over3Count / bodyVertexCount;
       const okFrac = over3Frac <= THRESHOLDS.BODY_DISPLACEMENT_MAX_OFFENDER_RATIO;
       const okHard = maxDisp.frac <= THRESHOLDS.BODY_DISPLACEMENT_HARD_FRAC;
       sub.bodyCoDeformation = {
         pass: okFrac && okHard,
-        measured: `${over3Count} of ${bodyVertexCount} non-waving-arm vertices (${(over3Frac * 100).toFixed(2)}%) ` +
-          `moved > ${THRESHOLDS.BODY_DISPLACEMENT_SOFT_FRAC * 100}% h (allowed <= ${THRESHOLDS.BODY_DISPLACEMENT_MAX_OFFENDER_RATIO * 100}%)` +
+        measured: `${over3Count} of ${bodyVertexCount} vertices outside the ${best.side} limb volume ` +
+          `(geometric at bind: plane at "${vol ? vol.upperArmJoint : 'n/a'}" + ` +
+          `${THRESHOLDS.LIMB_RADIUS_FRAC * 100}% h chain radius; ${limbVertexCount} limb vertices exempt) ` +
+          `(${(over3Frac * 100).toFixed(2)}%) moved > ${THRESHOLDS.BODY_DISPLACEMENT_SOFT_FRAC * 100}% h ` +
+          `(allowed <= ${THRESHOLDS.BODY_DISPLACEMENT_MAX_OFFENDER_RATIO * 100}%)` +
           (over3Example ? `, worst offender ${(over3Example.frac * 100).toFixed(2)}% h` : '') +
           `; max displacement ${(maxDisp.frac * 100).toFixed(2)}% h (hard cap ${THRESHOLDS.BODY_DISPLACEMENT_HARD_FRAC * 100}% h)` +
           `; ${nSamples} frames`,
-        bodyVertexCount, over3Count, over3Frac, maxFrac: maxDisp.frac, maxUnits: maxDisp.units,
+        bodyVertexCount, limbVertexCount, over3Count, over3Frac, maxFrac: maxDisp.frac, maxUnits: maxDisp.units,
         samples: nSamples,
       };
-      sub.edgeStrain = {
-        pass: strain.maxRatio <= THRESHOLDS.BODY_EDGE_STRAIN_MAX_RATIO,
-        measured: `max edge-length ratio ${strain.maxRatio.toFixed(2)}x vs the clip's first frame over ` +
-          `${bodyTriCount} all-body triangles (${bodyEdgeCount} edges); threshold <= ${THRESHOLDS.BODY_EDGE_STRAIN_MAX_RATIO}x`,
-        maxRatio: strain.maxRatio, bodyTriCount, bodyEdgeCount,
-      };
     }
+
+    // Edge strain (V8) on the wave clip, surfaced as a wave sub-check.
+    const scan = deformScanClip(doc, anim, 'wave');
+    sub.edgeStrain = {
+      pass: !!scan.strain.ok,
+      measured: `V8 over ALL edges (vs bind AND clip start): ${scan.strain.detail}`,
+      maxRatio: scan.strain.maxRatio ?? null,
+      softCount: scan.strain.softCount, hardCount: scan.strain.hardCount,
+      totalEdges: scan.strain.totalEdges,
+    };
   }
 
   const pass = Object.values(sub).every(s => s.pass);
@@ -2108,6 +2198,759 @@ function checkLimbIntegrity(docs) {
   };
 }
 
+/* ====================================================================== *
+ * Fix round 3 — geometric limb volumes (V3'/V8), all-edge strain (V8),
+ * seam cracks (V9), reverse leakage (V4'), bind-time mis-binding (V7').
+ * ====================================================================== */
+
+/** Bind-pose position (mesh space) of joint node j: inverse of its IBM in
+ *  the first skin that lists it; rest-pose world position as fallback. */
+function jointBindMap(doc) {
+  if (doc._jointBind) return doc._jointBind;
+  const map = new Map();
+  const h = modelHeight(doc) || 1;
+  (doc.json.skins || []).forEach((skin, si) => {
+    const sd = limbSkinData(doc, si, h);
+    (skin.joints || []).forEach((j, k) => { if (!map.has(j)) map.set(j, sd.bindPos[k]); });
+  });
+  doc._jointBind = map;
+  return map;
+}
+
+/**
+ * GEOMETRIC arm-limb volumes, fixed at BIND — V3' body membership and V8
+ * edge classes key off geometry, never off weights (a re-pointed torso
+ * vertex stays a torso vertex). Per sided arm chain:
+ *
+ *   upper-arm joint U = the topmost non-shoulder/clavicle joint of the
+ *   chain (the shoulder girdle belongs to the torso);
+ *   upper-arm bone   = U -> its chain child on the path to the hand end;
+ *   limb volume      = the half-space on the limb side of the plane
+ *   through U perpendicular to the upper-arm bone, INTERSECTED with the
+ *   set of points within LIMB_RADIUS_FRAC * h of the chain's bind bone
+ *   segments at/below U.
+ *
+ * `union(px,py,pz)` tests membership in ANY side's volume.
+ */
+function limbVolumes(doc) {
+  if (doc._limbVolumes) return doc._limbVolumes;
+  const cls = classifyJoints(doc);
+  const h = modelHeight(doc) || 1;
+  const R = THRESHOLDS.LIMB_RADIUS_FRAC * h;
+  const bind = jointBindMap(doc);
+  const parents = doc.parents();
+  const pos = j => bind.get(j) || restWorldPos(doc, j);
+  const sides = {};
+
+  for (const side of ['left', 'right', 'unsided']) {
+    const chain = cls.armChains[side];
+    if (!chain || !chain.size) continue;
+    // upper-arm joint U: topmost non-shoulder chain joint (fallback: topmost).
+    let U = null, bestD = Infinity;
+    for (const j of chain) {
+      if (matchesCategory(doc.nodeName(j), JOINT_NAME_PATTERNS.shoulder)) continue;
+      const d = cls.depth.get(j) || 0;
+      if (d < bestD) { bestD = d; U = j; }
+    }
+    if (U === null) {
+      for (const j of chain) {
+        const d = cls.depth.get(j) || 0;
+        if (d < bestD) { bestD = d; U = j; }
+      }
+    }
+    // hand-end joint: deepest handEnd-named chain joint (fallback: deepest).
+    let handJ = null, hd = -1;
+    for (const j of chain) {
+      if (!matchesCategory(doc.nodeName(j), JOINT_NAME_PATTERNS.handEnd)) continue;
+      const d = cls.depth.get(j) || 0;
+      if (d > hd) { hd = d; handJ = j; }
+    }
+    if (handJ === null) {
+      for (const j of chain) {
+        const d = cls.depth.get(j) || 0;
+        if (d > hd) { hd = d; handJ = j; }
+      }
+    }
+    const Upos = pos(U);
+    // plane normal: along the upper-arm bone (U -> its child on the path to
+    // the hand end; fallbacks: any chain child of U, then parent(U) -> U).
+    let dirTarget = null;
+    {
+      let cur = handJ, prev = null, found = false;
+      while (cur !== undefined) {
+        if (cur === U) { found = true; break; }
+        prev = cur;
+        cur = parents.get(cur);
+      }
+      if (found && prev !== null) dirTarget = prev;
+    }
+    if (dirTarget === null) {
+      for (const c of doc.json.nodes[U]?.children || []) if (chain.has(c)) { dirTarget = c; break; }
+    }
+    let n;
+    if (dirTarget !== null) {
+      const c = pos(dirTarget);
+      n = [c[0] - Upos[0], c[1] - Upos[1], c[2] - Upos[2]];
+    } else {
+      const p = parents.get(U);
+      const pp = p !== undefined ? pos(p) : [0, 0, 0];
+      n = [Upos[0] - pp[0], Upos[1] - pp[1], Upos[2] - pp[2]];
+    }
+    const nl = Math.hypot(n[0], n[1], n[2]) || 1;
+    n = [n[0] / nl, n[1] / nl, n[2] / nl];
+    // bind bone segments of the chain at/below U.
+    const under = new Set([U]);
+    const stack = [U];
+    while (stack.length) {
+      const x = stack.pop();
+      for (const c of doc.json.nodes[x]?.children || []) {
+        if (chain.has(c) && !under.has(c)) { under.add(c); stack.push(c); }
+      }
+    }
+    const segList = [];
+    for (const j of under) {
+      if (j === U) continue;
+      const p = parents.get(j);
+      if (p === undefined || !under.has(p)) continue;
+      segList.push([pos(p), pos(j)]);
+    }
+    if (!segList.length) segList.push([Upos, pos(handJ)]);
+    const packed = new Float64Array(segList.length * 6);
+    segList.forEach(([a, b], s) => { packed.set(a, s * 6); packed.set(b, s * 6 + 3); });
+    sides[side] = {
+      side,
+      upperArmJoint: doc.nodeName(U),
+      member(px, py, pz) {
+        if ((px - Upos[0]) * n[0] + (py - Upos[1]) * n[1] + (pz - Upos[2]) * n[2] < 0) return false;
+        for (let s = 0; s < packed.length; s += 6) {
+          if (distPointSeg(px, py, pz, packed, s) <= R) return true;
+        }
+        return false;
+      },
+    };
+  }
+  const list = Object.values(sides);
+  const vols = { ...sides, union: (px, py, pz) => list.some(v => v.member(px, py, pz)) };
+  doc._limbVolumes = vols;
+  return vols;
+}
+
+/**
+ * One deformation scan of a clip, shared by V8 (edge strain) and V9 (seam
+ * cracks) — LBS over every skinned vertex at WAVE_SAMPLES_PER_SECOND.
+ *
+ * V8: EVERY edge of every skinned primitive (NO exemption for triangles
+ * touching waving-arm vertices — the old V3 dropped exactly the boundary
+ * where the arm tears off the torso), measured against BOTH baselines: the
+ * BIND length (raw POSITION — catches assets whose very first frame is
+ * already torn open vs the authored surface) and the clip's first frame.
+ * Edges wholly inside a geometric limb volume get the looser elbow/shoulder
+ * fold caps. See THRESHOLDS.EDGE_*.
+ *
+ * V9: weld groups = vertices co-located within SEAM_WELD_EPS at bind (UV /
+ * normal seams duplicate vertices); at every sampled frame the maximum
+ * intra-group separation must stay <= SEAM_MAX_SEPARATION_FRAC * h, else
+ * the texture seam visibly cracks apart. See THRESHOLDS.SEAM_*.
+ */
+function deformScanClip(doc, anim, clipName) {
+  if (!doc._deformScan) doc._deformScan = new Map();
+  const key = (doc.json.animations || []).indexOf(anim);
+  if (doc._deformScan.has(key)) return doc._deformScan.get(key);
+  const T = THRESHOLDS;
+  const done = r => { doc._deformScan.set(key, r); return r; };
+  const failBoth = detail => done({
+    clip: clipName,
+    strain: { ok: false, detail, maxRatio: null },
+    seams: { ok: false, detail, maxSepFrac: null },
+  });
+
+  const height = modelHeight(doc);
+  if (!(height > 0)) return failBoth('model height is zero — cannot scale thresholds');
+  const pose = buildPoseSampler(doc, anim);
+  if (!(pose.duration > 0)) return failBoth('clip has zero duration');
+  const times = sampleTimes(pose.duration);
+  const rendered = renderedNodeSet(doc);
+  const vols = limbVolumes(doc);
+
+  // ---- collect skinned primitives + per-vertex bind data.
+  const prims = [];
+  for (const nIdx of rendered) {
+    const node = doc.json.nodes[nIdx];
+    if (!node || node.mesh === undefined || node.skin === undefined) continue;
+    for (const prim of doc.json.meshes[node.mesh].primitives || []) {
+      const at = prim.attributes || {};
+      if (at.POSITION === undefined || at.JOINTS_0 === undefined || at.WEIGHTS_0 === undefined) continue;
+      const pos = doc.accessor(at.POSITION);
+      const jnt = doc.accessor(at.JOINTS_0);
+      const wgt = doc.accessor(at.WEIGHTS_0);
+      const nv = pos.count;
+      const skin = doc.json.skins[node.skin];
+      const jointsArr = skin.joints;
+      const ibmAcc = skin.inverseBindMatrices !== undefined ? doc.accessor(skin.inverseBindMatrices) : null;
+      const ibm = jointsArr.map((_, k) => (ibmAcc ? Array.from(ibmAcc.data.slice(k * 16, k * 16 + 16)) : mat4Identity()));
+      const inLimb = new Uint8Array(nv);
+      for (let v = 0; v < nv; v++) {
+        if (vols.union(pos.data[v * 3], pos.data[v * 3 + 1], pos.data[v * 3 + 2])) inLimb[v] = 1;
+      }
+      // unique edges from the primitive's triangles.
+      const edgeKeys = new Map(); // a*nv+b (a<b) -> edge list index
+      const ea = [], eb = [];
+      {
+        const idx = prim.indices !== undefined ? doc.accessor(prim.indices).data : null;
+        const count = idx ? idx.length : nv;
+        const mode = prim.mode === undefined ? 4 : prim.mode;
+        const vtx = i => (idx ? idx[i] : i);
+        const pushEdge = (p, q) => {
+          const kk = p < q ? p * nv + q : q * nv + p;
+          if (!edgeKeys.has(kk)) { edgeKeys.set(kk, ea.length); ea.push(Math.min(p, q)); eb.push(Math.max(p, q)); }
+        };
+        const pushTri = (a, b, c) => { pushEdge(a, b); pushEdge(b, c); pushEdge(a, c); };
+        if (mode === 4) for (let i = 0; i + 2 < count; i += 3) pushTri(vtx(i), vtx(i + 1), vtx(i + 2));
+        else if (mode === 5) for (let i = 0; i + 2 < count; i++) pushTri(vtx(i), vtx(i + 1), vtx(i + 2));
+        else if (mode === 6) for (let i = 1; i + 1 < count; i++) pushTri(vtx(0), vtx(i), vtx(i + 1));
+      }
+      const ne = ea.length;
+      const eLimb = new Uint8Array(ne);     // both endpoints inside a limb volume
+      const bindLen = new Float64Array(ne);
+      for (let e = 0; e < ne; e++) {
+        const a = ea[e], b = eb[e];
+        eLimb[e] = inLimb[a] && inLimb[b] ? 1 : 0;
+        bindLen[e] = Math.hypot(
+          pos.data[a * 3] - pos.data[b * 3],
+          pos.data[a * 3 + 1] - pos.data[b * 3 + 1],
+          pos.data[a * 3 + 2] - pos.data[b * 3 + 2]);
+      }
+      prims.push({
+        nIdx, node, pos, jnt, wgt, nv, jointsArr, ibm, inLimb,
+        ea: Uint32Array.from(ea), eb: Uint32Array.from(eb), ne, eLimb, bindLen,
+        startLen: new Float64Array(ne),
+        softFlag: new Uint8Array(ne), hardFlag: new Uint8Array(ne),
+        cur: new Float64Array(nv * 3), skinned: null,
+      });
+    }
+  }
+  if (!prims.length) return failBoth('no skinned primitives (POSITION+JOINTS_0+WEIGHTS_0) found');
+
+  // ---- weld groups across all primitives (bind positions, SEAM_WELD_EPS).
+  const eps = T.SEAM_WELD_EPS;
+  const groups = []; // arrays of { p: primIndex, v }
+  {
+    const cell = new Map(); // "x:y:z" -> array of { p, v, gi }
+    for (let pi = 0; pi < prims.length; pi++) {
+      const { pos, nv } = prims[pi];
+      for (let v = 0; v < nv; v++) {
+        const x = pos.data[v * 3], y = pos.data[v * 3 + 1], z = pos.data[v * 3 + 2];
+        const cx = Math.round(x / eps), cy = Math.round(y / eps), cz = Math.round(z / eps);
+        let gi = -1;
+        outer:
+        for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
+          const list = cell.get(`${cx + dx}:${cy + dy}:${cz + dz}`);
+          if (!list) continue;
+          for (const e of list) {
+            const q = prims[e.p].pos.data;
+            if (Math.abs(q[e.v * 3] - x) <= eps && Math.abs(q[e.v * 3 + 1] - y) <= eps && Math.abs(q[e.v * 3 + 2] - z) <= eps) {
+              gi = e.gi; break outer;
+            }
+          }
+        }
+        if (gi === -1) { gi = groups.length; groups.push([]); }
+        groups[gi].push({ p: pi, v });
+        const ck = `${cx}:${cy}:${cz}`;
+        if (!cell.has(ck)) cell.set(ck, []);
+        cell.get(ck).push({ p: pi, v, gi });
+      }
+    }
+  }
+  const multiGroups = groups.filter(g => g.length >= 2);
+  const groupMaxSep = new Float64Array(multiGroups.length);
+
+  // ---- frame loop: skin everything; edges vs bind + vs clip start; seams.
+  const strain = {
+    maxRatio: 1, maxRatioWhere: null, maxOpenFrac: 0, maxOpenWhere: null,
+    totalEdges: prims.reduce((a, p) => a + p.ne, 0),
+  };
+  const minOpen = T.EDGE_MIN_OPEN_FRAC * height;
+  const absOpen = T.EDGE_ABS_OPEN_FRAC * height;
+
+  for (let f = 0; f < times.length; f++) {
+    const g = pose.globalsAt(times[f]);
+    for (const pr of prims) {
+      const jm = pr.jointsArr.map((j, k) => mat4Mul(g[j], pr.ibm[k]));
+      const { pos, jnt, wgt, nv, cur } = pr;
+      for (let v = 0; v < nv; v++) {
+        const p = [pos.data[v * 3], pos.data[v * 3 + 1], pos.data[v * 3 + 2]];
+        let ox = 0, oy = 0, oz = 0, tw = 0;
+        for (let c = 0; c < 4; c++) {
+          const w = wgt.data[v * 4 + c];
+          if (w === 0) continue;
+          tw += w;
+          const q = mat4TransformPoint(jm[jnt.data[v * 4 + c]], p);
+          ox += w * q[0]; oy += w * q[1]; oz += w * q[2];
+        }
+        if (tw === 0) { ox = p[0]; oy = p[1]; oz = p[2]; } // unskinned: static
+        cur[v * 3] = ox; cur[v * 3 + 1] = oy; cur[v * 3 + 2] = oz;
+      }
+      const { ea, eb, ne, eLimb, bindLen, startLen, softFlag, hardFlag } = pr;
+      for (let e = 0; e < ne; e++) {
+        const a = ea[e], b = eb[e];
+        const len = Math.hypot(cur[a * 3] - cur[b * 3], cur[a * 3 + 1] - cur[b * 3 + 1], cur[a * 3 + 2] - cur[b * 3 + 2]);
+        if (f === 0) startLen[e] = len;
+        const softR = eLimb[e] ? T.EDGE_SOFT_RATIO_LIMB : T.EDGE_SOFT_RATIO_BODY;
+        const hardR = eLimb[e] ? T.EDGE_HARD_RATIO_LIMB : T.EDGE_HARD_RATIO_BODY;
+        for (const base of f === 0 ? [bindLen[e]] : [bindLen[e], startLen[e]]) {
+          const open = len - base;
+          if (open <= minOpen) continue; // shrinking / sub-visible: never an offense
+          const ratio = base > 1e-12 ? len / base : Infinity;
+          if (ratio > strain.maxRatio) {
+            strain.maxRatio = ratio;
+            strain.maxRatioWhere = { clipTime: times[f], limb: !!eLimb[e], openFrac: open / height };
+          }
+          if (open / height > strain.maxOpenFrac) {
+            strain.maxOpenFrac = open / height;
+            strain.maxOpenWhere = { clipTime: times[f], limb: !!eLimb[e], ratio };
+          }
+          if (ratio > softR) softFlag[e] = 1;
+          if (ratio > hardR || open > absOpen) hardFlag[e] = 1;
+        }
+      }
+    }
+    for (let gi = 0; gi < multiGroups.length; gi++) {
+      const g2 = multiGroups[gi];
+      let worst = 0;
+      for (let i = 0; i < g2.length; i++) {
+        const ci = prims[g2[i].p].cur, vi = g2[i].v;
+        for (let j2 = i + 1; j2 < g2.length; j2++) {
+          const cj = prims[g2[j2].p].cur, vj = g2[j2].v;
+          const d = Math.hypot(ci[vi * 3] - cj[vj * 3], ci[vi * 3 + 1] - cj[vj * 3 + 1], ci[vi * 3 + 2] - cj[vj * 3 + 2]);
+          if (d > worst) worst = d;
+        }
+      }
+      if (worst > groupMaxSep[gi]) groupMaxSep[gi] = worst;
+    }
+  }
+
+  // ---- verdicts.
+  let softCount = 0, hardCount = 0, softLimb = 0;
+  for (const pr of prims) {
+    for (let e = 0; e < pr.ne; e++) {
+      if (pr.softFlag[e]) { softCount++; if (pr.eLimb[e]) softLimb++; }
+      if (pr.hardFlag[e]) hardCount++;
+    }
+  }
+  const softFrac = softCount / strain.totalEdges;
+  const strainOk = softFrac <= T.EDGE_OFFENDER_RATIO && hardCount === 0;
+  const strainRow = {
+    ok: strainOk,
+    maxRatio: strain.maxRatio, maxOpenFrac: strain.maxOpenFrac,
+    softCount, softFrac, hardCount, totalEdges: strain.totalEdges, samples: times.length,
+    detail: `${softCount} of ${strain.totalEdges} edges (${(softFrac * 100).toFixed(2)}%) stretched past ` +
+      `${T.EDGE_SOFT_RATIO_BODY}x (limb-interior ${T.EDGE_SOFT_RATIO_LIMB}x; ${softLimb} of them limb) vs bind or clip start ` +
+      `(allowed <= ${T.EDGE_OFFENDER_RATIO * 100}%); ${hardCount} edge(s) past the hard cap ` +
+      `${T.EDGE_HARD_RATIO_BODY}x (limb ${T.EDGE_HARD_RATIO_LIMB}x) or opening > ${T.EDGE_ABS_OPEN_FRAC * 100}% h (allowed 0); ` +
+      `max ratio ${Number.isFinite(strain.maxRatio) ? strain.maxRatio.toFixed(2) + 'x' : 'inf'}` +
+      (strain.maxRatioWhere ? ` (${strain.maxRatioWhere.limb ? 'limb' : 'body'} edge, t=${strain.maxRatioWhere.clipTime.toFixed(2)}s)` : '') +
+      `, max opening ${(strain.maxOpenFrac * 100).toFixed(2)}% h; ratio offenses require opening > ` +
+      `${T.EDGE_MIN_OPEN_FRAC * 100}% h; ${times.length} frames`,
+  };
+
+  const sepCap = T.SEAM_MAX_SEPARATION_FRAC * height;
+  let badGroups = 0, worstSep = 0, diffWeightGroups = 0;
+  for (let gi = 0; gi < multiGroups.length; gi++) {
+    if (groupMaxSep[gi] > sepCap) badGroups++;
+    if (groupMaxSep[gi] > worstSep) worstSep = groupMaxSep[gi];
+  }
+  for (const g2 of multiGroups) {
+    const sig = m => {
+      const { jnt, wgt } = prims[m.p];
+      const pairs = [];
+      for (let c = 0; c < 4; c++) pairs.push([jnt.data[m.v * 4 + c], +wgt.data[m.v * 4 + c].toFixed(6)]);
+      return JSON.stringify(pairs.sort((x, y) => x[0] - y[0]));
+    };
+    const first = sig(g2[0]);
+    if (g2.some(m => sig(m) !== first)) diffWeightGroups++;
+  }
+  const seamsOk = badGroups === 0;
+  const seamRow = {
+    ok: seamsOk,
+    groups: multiGroups.length, diffWeightGroups, badGroups,
+    maxSepFrac: worstSep / height, samples: times.length,
+    detail: `${multiGroups.length} weld group(s) of vertices co-located within ${T.SEAM_WELD_EPS} at bind ` +
+      `(${diffWeightGroups} with differing weights); ${badGroups} group(s) split past ` +
+      `${T.SEAM_MAX_SEPARATION_FRAC * 100}% h (allowed 0); worst separation ` +
+      `${((worstSep / height) * 100).toFixed(2)}% h; ${times.length} frames`,
+  };
+
+  return done({ clip: clipName, strain: strainRow, seams: seamRow });
+}
+
+/** V8: all-edge strain, every clip, vs bind AND vs clip start. */
+function checkEdgeStrain(docs) {
+  const rows = [];
+  let pass = true;
+  for (const group of REQUIRED_CLIPS) {
+    const hit = findClip(docs, group);
+    if (!hit) { rows.push({ clip: group.join('|'), ok: false, detail: 'clip not found' }); pass = false; continue; }
+    const scan = deformScanClip(hit.doc, hit.anim, hit.clipName);
+    const r = { clip: hit.clipName, ...scan.strain };
+    rows.push(r);
+    if (!r.ok) pass = false;
+  }
+  const T = THRESHOLDS;
+  return {
+    id: 'edgeStrain',
+    title: `V8 edge strain: ALL edges, every clip, vs bind AND clip start ` +
+      `(<= ${T.EDGE_OFFENDER_RATIO * 100}% of edges past ${T.EDGE_SOFT_RATIO_BODY}x/` +
+      `${T.EDGE_SOFT_RATIO_LIMB}x-limb; none past ${T.EDGE_HARD_RATIO_BODY}x/` +
+      `${T.EDGE_HARD_RATIO_LIMB}x-limb or opening > ${T.EDGE_ABS_OPEN_FRAC * 100}% h)`,
+    pass,
+    measured: rows.map(r => `${r.clip}: ${r.ok ? 'ok' : 'FAIL'}`).join('; '),
+    details: { rows },
+  };
+}
+
+/** V9: UV-seam cracks — weld groups must not split in any clip. */
+function checkSeamCracks(docs) {
+  const rows = [];
+  let pass = true;
+  for (const group of REQUIRED_CLIPS) {
+    const hit = findClip(docs, group);
+    if (!hit) { rows.push({ clip: group.join('|'), ok: false, detail: 'clip not found' }); pass = false; continue; }
+    const scan = deformScanClip(hit.doc, hit.anim, hit.clipName);
+    const r = { clip: hit.clipName, ...scan.seams };
+    rows.push(r);
+    if (!r.ok) pass = false;
+  }
+  return {
+    id: 'seamCracks',
+    title: `V9 seam cracks: vertices co-located within ${THRESHOLDS.SEAM_WELD_EPS} at bind stay within ` +
+      `${THRESHOLDS.SEAM_MAX_SEPARATION_FRAC * 100}% h of each other in every clip`,
+    pass,
+    measured: rows.map(r => `${r.clip}: ${r.ok ? 'ok' : 'FAIL'}`).join('; '),
+    details: { rows },
+  };
+}
+
+/**
+ * V4' reverse leakage: ZERO vertices DOMINATED by an arm-chain joint
+ * (clavicle/shoulder included) inside the GEOMETRIC head region — bind
+ * height above the topmost neck joint AND within HEAD_REGION_RADIUS_FRAC*h
+ * of the head joints' bind bone star. V4 tests head-DOMINATED vertices
+ * only, so a cheek tuft whose dominant joint is RightShoulder never
+ * entered it (proven: RightShoulder owned 393 vertices above the neck).
+ * Static check — bind pose only.
+ */
+function checkReverseLeakage(docs) {
+  const T = THRESHOLDS;
+  const rows = [];
+  let pass = true;
+  for (const doc of docs) {
+    const height = modelHeight(doc);
+    const cls = classifyJoints(doc);
+    if (!cls.joints.size || !(height > 0)) {
+      rows.push({ file: doc.label, ok: false, detail: 'no skin joints / zero model height' });
+      pass = false;
+      continue;
+    }
+    if (!cls.headSeeds.size) {
+      rows.push({ file: doc.label, ok: true, detail: 'no head-named joints — no head region to protect (pattern list may need extending)' });
+      continue;
+    }
+    const bind = jointBindMap(doc);
+    const parents = doc.parents();
+    const pos = j => bind.get(j) || restWorldPos(doc, j);
+    // neck height: topmost (max bind Y) neck-named joint; fallback: midpoint
+    // between the topmost head joint and its parent joint.
+    let neckY = -Infinity, neckName = null;
+    for (const j of cls.neckSeeds) {
+      const y = pos(j)[1];
+      if (y > neckY) { neckY = y; neckName = doc.nodeName(j); }
+    }
+    if (neckY === -Infinity) {
+      let H = null, hd = Infinity;
+      for (const j of cls.headSeeds) {
+        const d = cls.depth.get(j) || 0;
+        if (d < hd) { hd = d; H = j; }
+      }
+      const p = parents.get(H);
+      neckY = p !== undefined ? (pos(H)[1] + pos(p)[1]) / 2 : pos(H)[1] - 0.05 * height;
+      neckName = `midpoint(${doc.nodeName(H)}, parent) [no neck joint]`;
+    }
+    // head bone star: bind segments incident to head-named joints.
+    const headSegs = [];
+    (doc.json.skins || []).forEach((skin, si) => {
+      const sd = limbSkinData(doc, si, height);
+      (skin.joints || []).forEach((j, k) => {
+        if (!cls.headSeeds.has(j)) return;
+        const star = sd.star[k];
+        for (let s = 0; s < star.length; s += 6) headSegs.push(Array.from(star.slice(s, s + 6)));
+      });
+    });
+    const headPacked = new Float64Array(headSegs.length * 6);
+    headSegs.forEach((s, i) => headPacked.set(s, i * 6));
+    const radius = T.HEAD_REGION_RADIUS_FRAC * height;
+    const inHeadRegion = (x, y, z) => {
+      if (y <= neckY) return false;
+      for (let s = 0; s < headPacked.length; s += 6) {
+        if (distPointSeg(x, y, z, headPacked, s) <= radius) return true;
+      }
+      return false;
+    };
+
+    let regionVerts = 0, violations = 0;
+    let worst = { y: -Infinity, joint: null, vert: -1, node: null };
+    const tally = new Map();
+    const rendered = renderedNodeSet(doc);
+    for (const nIdx of rendered) {
+      const node = doc.json.nodes[nIdx];
+      if (!node || node.mesh === undefined || node.skin === undefined) continue;
+      const jointsArr = doc.json.skins[node.skin].joints;
+      for (const prim of doc.json.meshes[node.mesh].primitives || []) {
+        const at = prim.attributes || {};
+        if (at.POSITION === undefined || at.JOINTS_0 === undefined || at.WEIGHTS_0 === undefined) continue;
+        const posAcc = doc.accessor(at.POSITION);
+        const jnt = doc.accessor(at.JOINTS_0);
+        const wgt = doc.accessor(at.WEIGHTS_0);
+        for (let v = 0; v < posAcc.count; v++) {
+          const x = posAcc.data[v * 3], y = posAcc.data[v * 3 + 1], z = posAcc.data[v * 3 + 2];
+          if (!inHeadRegion(x, y, z)) continue;
+          regionVerts++;
+          let domK = -1, domW = -1;
+          for (let c = 0; c < 4; c++) {
+            const w = wgt.data[v * 4 + c];
+            if (w > domW) { domW = w; domK = jnt.data[v * 4 + c]; }
+          }
+          if (domW <= 0) continue;
+          const j = jointsArr[domK];
+          if (j === undefined || !cls.armAll.has(j)) continue;
+          violations++;
+          const name = doc.nodeName(j);
+          tally.set(name, (tally.get(name) || 0) + 1);
+          if (y > worst.y) worst = { y, joint: name, vert: v, node: doc.nodeName(nIdx) };
+        }
+      }
+    }
+    const ok = violations === 0;
+    const tallyStr = [...tally.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4)
+      .map(([n, c]) => `${n}:${c}`).join(', ');
+    rows.push({
+      file: doc.label, ok, regionVerts, violations,
+      detail: `head region = bind y > ${neckY.toFixed(3)} ("${neckName}") and <= ` +
+        `${T.HEAD_REGION_RADIUS_FRAC * 100}% h from the head bone star; ${regionVerts} vertices in region, ` +
+        `${violations} DOMINATED by an arm-chain joint (allowed 0)` +
+        (violations ? ` — by joint: ${tallyStr}; highest at y ${worst.y.toFixed(3)} (${worst.joint})` : ''),
+    });
+    if (!ok) pass = false;
+  }
+  return {
+    id: 'reverseLeakage',
+    title: `V4' reverse leakage: zero arm-chain-DOMINATED vertices (clavicle included) in the geometric head region`,
+    pass,
+    measured: rows.map(r => `${r.file}: ${r.ok ? 'ok' : 'FAIL'} — ${r.detail}`).join('; '),
+    details: { rows },
+  };
+}
+
+/**
+ * V7' bind-time mis-binding + limb-scale sanity. V7 measures motion
+ * relative to the bind wrap distance, so it is invariant BY CONSTRUCTION
+ * for rigid (single-joint) binds and blind to a wrong-but-rigid rig; V7'
+ * judges the BINDING itself, at bind:
+ *
+ *   dOwn  = min distance from the vertex to the bone stars of its weighted
+ *           joints (any weight > 0);
+ *   dNear = min distance to ANY bone segment of the skin.
+ *
+ *   soft offender: dOwn > MISBIND_OWN_FAR_FRAC*h  AND
+ *                  dNear < MISBIND_OTHER_NEAR_FRAC*h AND
+ *                  dOwn > MISBIND_DOMINANCE * dNear
+ *     (someone ELSE's bone explains the vertex several times better than
+ *      every bone it is weighted to — a paw chunk bound to the hips).
+ *     Allowed fraction: MISBIND_OFFENDER_RATIO.
+ *
+ *   hard offender: ANY single influence with weight >= MISBIND_HARD_WEIGHT
+ *     whose own star is > MISBIND_HARD_FAR_FRAC*h away while
+ *     dNear < MISBIND_OTHER_NEAR_FRAC*h and that influence's distance
+ *     > MISBIND_DOMINANCE * dNear. Catches small blended fragments
+ *     (0.55 Hand / 0.45 Spine2) whose DOMINANT bone is nearby. Allowed: 0.
+ *
+ *   scale sanity: every skin joint's scale (rest pose and every animated
+ *     scale value in every clip) must be 1 +- JOINT_SCALE_TOL per
+ *     component (a joint scaled 1.6x balloons its skin while V7's rigid
+ *     transport stays exactly invariant).
+ *
+ * Legitimately-far skin (muzzle, ears, belly, tail tip) is safe in
+ * principle: its OWN bone is also the NEAREST bone, so dOwn = dNear and
+ * the dominance factor can never fire.
+ */
+function checkMisBinding(docs) {
+  const T = THRESHOLDS;
+  const rows = [];
+  let pass = true;
+  for (const doc of docs) {
+    const height = modelHeight(doc);
+    const cls = classifyJoints(doc);
+    if (!cls.joints.size || !(height > 0)) {
+      rows.push({ file: doc.label, ok: false, detail: 'no skin joints / zero model height' });
+      pass = false;
+      continue;
+    }
+    // all bind bone segments of every skin.
+    const skinsData = (doc.json.skins || []).map((_, si) => limbSkinData(doc, si, height));
+    let segCount = 0;
+    for (const sd of skinsData) segCount += sd.segs.length;
+    const allSegs = new Float64Array(segCount * 6);
+    {
+      let o = 0;
+      for (const sd of skinsData) {
+        for (const [pk, k] of sd.segs) {
+          allSegs.set(sd.bindPos[pk], o);
+          allSegs.set(sd.bindPos[k], o + 3);
+          o += 6;
+        }
+      }
+    }
+    const distAll = (x, y, z) => {
+      let best = Infinity;
+      for (let s = 0; s < allSegs.length; s += 6) {
+        const d = distPointSeg(x, y, z, allSegs, s);
+        if (d < best) best = d;
+      }
+      return best;
+    };
+    const distToStar = (star, x, y, z) => {
+      let best = Infinity;
+      for (let s = 0; s < star.length; s += 6) {
+        const d = distPointSeg(x, y, z, star, s);
+        if (d < best) best = d;
+      }
+      return best;
+    };
+    const FAR = T.MISBIND_OWN_FAR_FRAC * height;
+    const NEAR = T.MISBIND_OTHER_NEAR_FRAC * height;
+    const HARD_FAR = T.MISBIND_HARD_FAR_FRAC * height;
+
+    let total = 0, soft = 0, hard = 0;
+    let softWorst = null, hardWorst = null;
+    const rendered = renderedNodeSet(doc);
+    for (const nIdx of rendered) {
+      const node = doc.json.nodes[nIdx];
+      if (!node || node.mesh === undefined || node.skin === undefined) continue;
+      const sd = skinsData[node.skin];
+      for (const prim of doc.json.meshes[node.mesh].primitives || []) {
+        const at = prim.attributes || {};
+        if (at.POSITION === undefined || at.JOINTS_0 === undefined || at.WEIGHTS_0 === undefined) continue;
+        const posAcc = doc.accessor(at.POSITION);
+        const jnt = doc.accessor(at.JOINTS_0);
+        const wgt = doc.accessor(at.WEIGHTS_0);
+        for (let v = 0; v < posAcc.count; v++) {
+          let tw = 0;
+          for (let c = 0; c < 4; c++) tw += wgt.data[v * 4 + c];
+          if (!(tw > 0)) continue;
+          total++;
+          const x = posAcc.data[v * 3], y = posAcc.data[v * 3 + 1], z = posAcc.data[v * 3 + 2];
+          let dOwn = Infinity;
+          const dInf = [Infinity, Infinity, Infinity, Infinity];
+          for (let c = 0; c < 4; c++) {
+            if (wgt.data[v * 4 + c] === 0) continue;
+            dInf[c] = distToStar(sd.star[jnt.data[v * 4 + c]], x, y, z);
+            if (dInf[c] < dOwn) dOwn = dInf[c];
+          }
+          const dNear = (dOwn > FAR || dInf.some((d, c2) => wgt.data[v * 4 + c2] >= T.MISBIND_HARD_WEIGHT && d > HARD_FAR))
+            ? distAll(x, y, z) : Infinity;
+          if (dOwn > FAR && dNear < NEAR && dOwn > T.MISBIND_DOMINANCE * dNear) {
+            soft++;
+            if (!softWorst || dOwn - dNear > softWorst.gap) {
+              softWorst = {
+                gap: dOwn - dNear, vert: v, node: doc.nodeName(nIdx),
+                dOwnFrac: dOwn / height, dNearFrac: dNear / height,
+              };
+            }
+          }
+          for (let c = 0; c < 4; c++) {
+            const w = wgt.data[v * 4 + c];
+            if (w < T.MISBIND_HARD_WEIGHT) continue;
+            if (dInf[c] > HARD_FAR && dNear < NEAR && dInf[c] > T.MISBIND_DOMINANCE * dNear) {
+              hard++;
+              if (!hardWorst || dInf[c] > hardWorst.dInf) {
+                hardWorst = {
+                  dInf: dInf[c], dInfFrac: dInf[c] / height, weight: w, vert: v,
+                  joint: doc.nodeName(sd.jointsArr[jnt.data[v * 4 + c]]),
+                  dNearFrac: dNear / height, node: doc.nodeName(nIdx),
+                };
+              }
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    // limb-scale sanity: rest scales + every animated scale value.
+    let scaleWorst = { dev: 0, joint: null, clip: null };
+    for (const j of cls.joints) {
+      const s = (doc.json.nodes[j] || {}).scale;
+      if (!s) continue;
+      for (const comp of s) {
+        const dev = Math.abs(comp - 1);
+        if (dev > scaleWorst.dev) scaleWorst = { dev, joint: doc.nodeName(j), clip: '(rest pose)' };
+      }
+    }
+    for (const anim of doc.json.animations || []) {
+      for (const ch of anim.channels || []) {
+        if (!ch.target || ch.target.path !== 'scale') continue;
+        if (!cls.joints.has(ch.target.node)) continue;
+        const sampler = anim.samplers[ch.sampler];
+        const out = doc.accessor(sampler.output);
+        const cubic = (sampler.interpolation || 'LINEAR') === 'CUBICSPLINE';
+        const keys = cubic ? out.count / 3 : out.count;
+        for (let k = 0; k < keys; k++) {
+          const base = (cubic ? k * 3 + 1 : k) * 3;
+          for (let c = 0; c < 3; c++) {
+            const dev = Math.abs(out.data[base + c] - 1);
+            if (dev > scaleWorst.dev) {
+              scaleWorst = { dev, joint: doc.nodeName(ch.target.node), clip: anim.name || '(unnamed clip)' };
+            }
+          }
+        }
+      }
+    }
+    const scaleOk = scaleWorst.dev <= T.JOINT_SCALE_TOL;
+
+    if (!total) {
+      rows.push({ file: doc.label, ok: false, detail: 'no vertices carry any skin weight' });
+      pass = false;
+      continue;
+    }
+    const ratio = soft / total;
+    const ok = ratio <= T.MISBIND_OFFENDER_RATIO && hard === 0 && scaleOk;
+    rows.push({
+      file: doc.label, ok, total, soft, softRatio: ratio, hard,
+      scaleWorstDev: scaleWorst.dev,
+      detail: `${soft} of ${total} skinned vertices (${(ratio * 100).toFixed(2)}%) mis-bound ` +
+        `(all own bones > ${T.MISBIND_OWN_FAR_FRAC * 100}% h away, another bone < ` +
+        `${T.MISBIND_OTHER_NEAR_FRAC * 100}% h and ${T.MISBIND_DOMINANCE}x closer; allowed <= ` +
+        `${T.MISBIND_OFFENDER_RATIO * 100}%)` +
+        (softWorst ? ` — worst: own ${(softWorst.dOwnFrac * 100).toFixed(1)}% h vs other ${(softWorst.dNearFrac * 100).toFixed(1)}% h` : '') +
+        `; ${hard} hard offender(s) (an influence >= ${T.MISBIND_HARD_WEIGHT} bound > ` +
+        `${T.MISBIND_HARD_FAR_FRAC * 100}% h from its bones while another bone is < ` +
+        `${T.MISBIND_OTHER_NEAR_FRAC * 100}% h; allowed 0)` +
+        (hardWorst ? ` — worst: ${(hardWorst.weight).toFixed(2)} on "${hardWorst.joint}" at ${(hardWorst.dInfFrac * 100).toFixed(1)}% h (nearest other ${(hardWorst.dNearFrac * 100).toFixed(1)}% h)` : '') +
+        `; joint scale ${scaleOk ? 'ok' : 'FAIL'} (max |scale-1| = ${scaleWorst.dev.toExponential(2)}` +
+        (scaleWorst.joint ? ` on "${scaleWorst.joint}" in ${scaleWorst.clip}` : '') +
+        `, tolerance ${T.JOINT_SCALE_TOL})`,
+    });
+    if (!ok) pass = false;
+  }
+  return {
+    id: 'misBinding',
+    title: `V7' mis-binding at bind: <= ${THRESHOLDS.MISBIND_OFFENDER_RATIO * 100}% of vertices bound only to far bones ` +
+      `while another bone is near; zero hard offenders; joint scales = 1 +- ${THRESHOLDS.JOINT_SCALE_TOL}`,
+    pass,
+    measured: rows.map(r => `${r.file}: ${r.ok ? 'ok' : 'FAIL'} — ${r.detail}`).join('; '),
+    details: { rows },
+  };
+}
+
 
 
 /* ========================================================================== *
@@ -2222,6 +3065,10 @@ export function validate(options = {}) {
   checks.push(guard(() => checkLoopSeams(docs)));
   checks.push(guard(() => checkJump(docs)));
   checks.push(guard(() => checkLimbIntegrity(docs)));
+  checks.push(guard(() => checkEdgeStrain(docs)));
+  checks.push(guard(() => checkSeamCracks(docs)));
+  checks.push(guard(() => checkReverseLeakage(docs)));
+  checks.push(guard(() => checkMisBinding(docs)));
 
   return { ok: checks.every(c => c.pass), layout, files: fileLabels, checks };
 }
@@ -2255,6 +3102,12 @@ function printReport(report) {
       }
     }
     if (c.id === 'limbIntegrity' && c.details?.rows) {
+      for (const r of c.details.rows) {
+        const b = r.ok ? pass(' ok ') : failc('FAIL');
+        console.log(`      [${b}] ${r.clip}: ${r.detail}`);
+      }
+    }
+    if (['edgeStrain', 'seamCracks'].includes(c.id) && c.details?.rows) {
       for (const r of c.details.rows) {
         const b = r.ok ? pass(' ok ') : failc('FAIL');
         console.log(`      [${b}] ${r.clip}: ${r.detail}`);

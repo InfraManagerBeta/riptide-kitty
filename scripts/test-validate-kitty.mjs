@@ -158,6 +158,28 @@ const BOX_TRIS = [ // 12 triangles over the 8-corner ordering above
  *                     check passes — the defect the older checks miss)
  *   articulated: walk swings both arms (loop-closed) and jump tucks them —
  *                correctly skinned limb articulation in walk/jump (V7 pass)
+ *   --- fix round 3 (V3'/V4'/V7'/V8/V9 blind-spot fixtures) ---
+ *   rebindPawHips: the outer paw chunk of the left arm (4 verts) rebound
+ *                100% to Hips — rides rigidly, V7 invariant BY CONSTRUCTION
+ *                (d_t = d_bind), V7' must flag the binding at bind time
+ *   rebindTorsoArm: 4 lower-torso verts rebound 100% to the waving upper
+ *                arm — the spec's own named disqualifier ("an arm welded to
+ *                the torso"); the old V3 exempted them by dominant joint,
+ *                V3' geometric body membership must fail them
+ *   blendMisbind: the paw chunk blended 0.55 L_Hand / 0.45 Spine — under
+ *                the 0.2% soft ratio (dominant bone is nearby) but a HARD
+ *                V7' offender (a 0.45 influence bound to far bones)
+ *   armScale:    animated scale on the upper-arm joint (e.g. 1.6) — V7's
+ *                rigid transport is exactly invariant to it; V7' scale
+ *                sanity must fail
+ *   seamPair:    two co-located verts on the arm, one bound to the arm and
+ *                one to the spine — a UV-seam duplicate pair that cracks
+ *                open in wave (V9)
+ *   cheekShoulder: 4 head-top verts DOMINATED by the right arm — V4 (head-
+ *                dominated only) is blind to it; V4' reverse leakage fails
+ *   boundaryTear: a tiny triangle at the arm/torso boundary whose short
+ *                edge tears ~10x when the arm raises (V8; the old V3 strain
+ *                dropped every triangle touching a waving-arm vertex)
  */
 export function makeKitty(opts = {}) {
   const {
@@ -171,6 +193,13 @@ export function makeKitty(opts = {}) {
     walkDrift = false,
     wave = 'good',
     articulated = false,
+    rebindPawHips = false,
+    rebindTorsoArm = false,
+    blendMisbind = false,
+    armScale = 0,
+    seamPair = false,
+    cheekShoulder = false,
+    boundaryTear = false,
   } = opts;
 
   const bin = new Bin();
@@ -213,6 +242,22 @@ export function makeKitty(opts = {}) {
   if (wave === 'doubledLimb') {
     for (const v of boxVerts(0.62, 1.47, 0, 0.07, 0.05, 0.05)) verts.push(v);
     for (const t of BOX_TRIS) indicesArr.push(...t.map(i => i + 32));
+  }
+  // V9 fixture: a UV-seam duplicate pair — two vertices at the SAME bind
+  // position on the upper arm, one bound to the arm, one to the spine.
+  let seamPairBase = -1;
+  if (seamPair) {
+    seamPairBase = verts.length;
+    verts.push([0.6, 1.5, 0.05], [0.6, 1.5, 0.05]);
+  }
+  // V8 fixture: a tiny triangle at the arm/torso boundary; its 0.005-long
+  // edge (arm-bound vert to spine-bound vert) tears ~10x when the arm
+  // raises 60 degrees.
+  let tearBase = -1;
+  if (boundaryTear) {
+    tearBase = verts.length;
+    verts.push([0.40, 1.55, 0], [0.40, 1.545, 0], [0.40, 1.54, 0.01]);
+    indicesArr.push(tearBase, tearBase + 1, tearBase + 2);
   }
   if (hugeTriangles) {
     // Degenerate but structurally valid extra triangles to blow the budget.
@@ -259,6 +304,13 @@ export function makeKitty(opts = {}) {
     // dominant = L_Arm (6), statics Hips (1) + Spine (2) sum to 0.66:
     for (let v = 32; v < 40; v++) setW(v, [[6, 0.34], [1, 0.33], [2, 0.33]]);
   }
+  // --- fix round 3 fixture mutations (see the doc comment above) ---------
+  if (rebindPawHips) for (const v of [20, 21, 22, 23]) setW(v, [[1, 1]]);   // paw chunk -> Hips
+  if (rebindTorsoArm) for (const v of [0, 1, 4, 5]) setW(v, [[6, 1]]);      // lower torso -> L_Arm
+  if (blendMisbind) for (const v of [20, 21, 22, 23]) setW(v, [[7, 0.55], [2, 0.45]]); // paw: 0.55 L_Hand / 0.45 Spine
+  if (cheekShoulder) for (const v of [10, 11, 14, 15]) setW(v, [[8, 0.6], [5, 0.4]]);  // head top -> R_Arm-dominated
+  if (seamPair) { setW(seamPairBase, [[6, 1]]); setW(seamPairBase + 1, [[2, 1]]); }
+  if (boundaryTear) { setW(tearBase, [[6, 1]]); setW(tearBase + 1, [[2, 1]]); setW(tearBase + 2, [[2, 1]]); }
 
   const posMin = [Infinity, Infinity, Infinity], posMax = [-Infinity, -Infinity, -Infinity];
   for (const [x, y, z] of verts) {
@@ -405,7 +457,15 @@ export function makeKitty(opts = {}) {
   for (const clip of clips) {
     const name = clip === 'walk' ? walkName : clip;
     if (clip === 'wave') {
-      addClip('wave', waveChannels());
+      const wch = waveChannels();
+      if (armScale) {
+        // V7' scale sanity: the upper-arm joint animated at a non-unit scale.
+        wch.push({
+          node: NODE.L_Arm, path: 'scale',
+          times: [0, 1.5], values: [[armScale, armScale, armScale], [armScale, armScale, armScale]],
+        });
+      }
+      addClip('wave', wch);
     } else if (clip === 'jump' && !jumpGrounded) {
       // A real jump: the hips (and with them the feet) leave the ground.
       const jumpCh = [{
@@ -755,7 +815,7 @@ test('FAILS wave V3: body-triangle stretch (edge strain) even when every displac
   assert.equal(sc.bodyCoDeformation.pass, true, sc.bodyCoDeformation.measured);
   assert.equal(sc.bodyCoDeformation.over3Count, 0, sc.bodyCoDeformation.measured);
   assert.equal(sc.edgeStrain.pass, false, sc.edgeStrain.measured);
-  assert.ok(sc.edgeStrain.maxRatio > THRESHOLDS.BODY_EDGE_STRAIN_MAX_RATIO, `ratio ${sc.edgeStrain.maxRatio}`);
+  assert.ok(sc.edgeStrain.maxRatio > THRESHOLDS.EDGE_SOFT_RATIO_BODY, `ratio ${sc.edgeStrain.maxRatio}`);
   assert.equal(report.ok, false);
 });
 
@@ -810,4 +870,119 @@ test('V7 PASSES: correctly skinned limbs articulating in walk and jump', () => {
   // the whole fixture stays green (the articulation breaks no other check):
   assert.equal(report.ok, true,
     JSON.stringify(report.checks.filter(x => !x.pass).map(x => [x.id, x.measured])));
+});
+
+/* ========================================================================== *
+ * Tests — fix round 3: V3' / V4' / V7' / V8 / V9 blind-spot fixtures.
+ * Both round-3 probes proved V7 is invariant BY CONSTRUCTION for any vertex
+ * bound 100% to one joint (skinned = delta_k * v_bind, so d_t = d_bind at
+ * every frame) and that V3's dominant-joint body membership can be escaped
+ * by re-pointing weights. Each fixture below reproduces one proven pass.
+ * ========================================================================== */
+
+test("V7' FAILS: a paw chunk rebound 100% to Hips rides rigidly — V7 stays invariant, V7' flags the binding at bind", () => {
+  const report = validate({ files: { single: makeKitty({ rebindPawHips: true }) } });
+  // The proven V7 blind spot: the rigid rebind is exactly invariant.
+  assert.equal(check(report, 'limbIntegrity').pass, true,
+    'V7 must NOT see a rigid rebind: ' + check(report, 'limbIntegrity').measured);
+  const mb = check(report, 'misBinding');
+  assert.equal(mb.pass, false, mb.measured);
+  const row = mb.details.rows[0];
+  assert.ok(row.soft >= 4, `soft offenders ${row.soft}`);
+  assert.ok(row.softRatio > THRESHOLDS.MISBIND_OFFENDER_RATIO, `ratio ${row.softRatio}`);
+  assert.equal(report.ok, false);
+});
+
+test("V3' FAILS: torso vertices rebound 100% to the waving upper arm — the spec's named disqualifier, caught by GEOMETRIC body membership", () => {
+  const report = validate({ files: { single: makeKitty({ rebindTorsoArm: true }) } });
+  // V7 is invariant (rigid rebind), and the old V3 exempted these vertices
+  // because their CURRENT dominant joint was the waving arm:
+  assert.equal(check(report, 'limbIntegrity').pass, true,
+    'V7 must NOT see a rigid rebind: ' + check(report, 'limbIntegrity').measured);
+  const sc = subChecks(report);
+  assert.equal(sc.bodyCoDeformation.pass, false, sc.bodyCoDeformation.measured);
+  assert.ok(sc.bodyCoDeformation.over3Frac > THRESHOLDS.BODY_DISPLACEMENT_MAX_OFFENDER_RATIO,
+    `over-3%h fraction ${sc.bodyCoDeformation.over3Frac}`);
+  assert.ok(sc.bodyCoDeformation.maxFrac > THRESHOLDS.BODY_DISPLACEMENT_HARD_FRAC,
+    `hard cap must also trip: ${sc.bodyCoDeformation.maxFrac}`);
+  assert.equal(report.ok, false);
+});
+
+test("V7' FAILS hard: a small blended fragment (0.55 hand / 0.45 spine) stays under the 0.2% soft ratio but is a HARD offender", () => {
+  const report = validate({ files: { single: makeKitty({ blendMisbind: true }) } });
+  const mb = check(report, 'misBinding');
+  assert.equal(mb.pass, false, mb.measured);
+  const row = mb.details.rows[0];
+  assert.ok(row.softRatio <= THRESHOLDS.MISBIND_OFFENDER_RATIO,
+    `the fragment's dominant bone is nearby, so the soft ratio must NOT trip: ${row.softRatio}`);
+  assert.ok(row.hard >= 1, `hard offenders ${row.hard}: ${row.detail}`);
+  assert.equal(report.ok, false);
+});
+
+test("V7' FAILS: the upper-arm joint animated at scale 1.6x — V7's rigid transport is exactly invariant to it", () => {
+  const report = validate({ files: { single: makeKitty({ armScale: 1.6 }) } });
+  assert.equal(check(report, 'limbIntegrity').pass, true,
+    'V7 must NOT see the scale (proven blind spot): ' + check(report, 'limbIntegrity').measured);
+  const mb = check(report, 'misBinding');
+  assert.equal(mb.pass, false, mb.measured);
+  assert.ok(mb.details.rows[0].scaleWorstDev > THRESHOLDS.JOINT_SCALE_TOL,
+    `scale deviation ${mb.details.rows[0].scaleWorstDev}`);
+  // V8 also sees the ballooned skin: arm edges stretch 1.6x vs BIND.
+  assert.equal(check(report, 'edgeStrain').pass, false, check(report, 'edgeStrain').measured);
+  assert.equal(report.ok, false);
+});
+
+test('V9 FAILS: UV-seam duplicate vertices with different weights crack apart in wave', () => {
+  const report = validate({ files: { single: makeKitty({ seamPair: true }) } });
+  const sm = check(report, 'seamCracks');
+  assert.equal(sm.pass, false, sm.measured);
+  const waveRow = sm.details.rows.find(r => r.clip === 'wave');
+  assert.ok(waveRow && !waveRow.ok, JSON.stringify(sm.details.rows));
+  assert.ok(waveRow.badGroups >= 1, waveRow.detail);
+  assert.ok(waveRow.maxSepFrac > THRESHOLDS.SEAM_MAX_SEPARATION_FRAC, `separation ${waveRow.maxSepFrac}`);
+  assert.equal(report.ok, false);
+});
+
+test("V4' FAILS: an arm-DOMINATED cheek region above the neck — V4 (head-dominated only) stays blind", () => {
+  const report = validate({ files: { single: makeKitty({ cheekShoulder: true }) } });
+  // V4 checks vertices whose DOMINANT joint is head/neck — these are
+  // arm-dominated, so V4 must NOT see them (the proven blind spot):
+  assert.equal(check(report, 'weightLeakage').pass, true, check(report, 'weightLeakage').measured);
+  const rl = check(report, 'reverseLeakage');
+  assert.equal(rl.pass, false, rl.measured);
+  assert.ok(rl.details.rows[0].violations >= 4, rl.details.rows[0].detail);
+  assert.equal(report.ok, false);
+});
+
+test('V8 FAILS: a boundary edge at the arm/torso seam tears ~10x — the old strain dropped every arm-touching triangle', () => {
+  const report = validate({ files: { single: makeKitty({ boundaryTear: true }) } });
+  const es = check(report, 'edgeStrain');
+  assert.equal(es.pass, false, es.measured);
+  const waveRow = es.details.rows.find(r => r.clip === 'wave');
+  assert.ok(waveRow && !waveRow.ok, JSON.stringify(es.details.rows));
+  assert.ok(waveRow.hardCount >= 1, waveRow.detail);
+  assert.ok(waveRow.maxRatio >= 5, `tear ratio ${waveRow.maxRatio}`);
+  // the wave sub-check mirrors the V8 wave verdict:
+  assert.equal(subChecks(report).edgeStrain.pass, false);
+  assert.equal(report.ok, false);
+});
+
+test("correct fixture PASSES every fix-round-3 check (V3'/V4'/V7'/V8/V9) in both layouts", () => {
+  for (const files of [
+    { single: makeKitty() },
+    {
+      idle: makeKitty({ clips: ['idle'] }),
+      jump: makeKitty({ clips: ['jump'] }),
+      walk: makeKitty({ clips: ['walk'] }),
+      wave: makeKitty({ clips: ['wave'] }),
+    },
+  ]) {
+    const report = validate({ files });
+    for (const id of ['edgeStrain', 'seamCracks', 'reverseLeakage', 'misBinding']) {
+      assert.equal(check(report, id).pass, true, `${id}: ${check(report, id).measured}`);
+    }
+    assert.equal(subChecks(report).bodyCoDeformation.pass, true);
+    assert.equal(report.ok, true,
+      JSON.stringify(report.checks.filter(c => !c.pass).map(c => [c.id, c.measured])));
+  }
 });
