@@ -43,9 +43,9 @@
     "V4_weight_leakage": {
       "pass": true,
       "detail": {
-        "head_neck_dominant_vertices": 7074,
+        "head_neck_dominant_vertices": 7522,
         "leaking_vertices": 0,
-        "max_arm_weight_on_head_neck": 0.0
+        "max_arm_weight_on_head_neck": 0.14576907455921173
       }
     },
     "V5_loop_seams": {
@@ -114,7 +114,7 @@
     "V3_co_deformation_displacement": {
       "pass": true,
       "detail": {
-        "non_waving_vertex_count": 11718,
+        "non_waving_vertex_count": 12098,
         "frac_over_3pct_height": 0.0,
         "max_allowed_frac_pct": 0.5,
         "abs_max_disp_pct_height": 4.019855282390694e-14,

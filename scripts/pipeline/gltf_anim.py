@@ -205,6 +205,41 @@ class GLTFScene:
         weights0 = self.read_accessor(prim.attributes.WEIGHTS_0)
         return joints0, weights0
 
+    def write_skin_weights(self, joints0, weights0):
+        """Write JOINTS_0 (u8 VEC4) / WEIGHTS_0 (f32 VEC4) back into this
+        scene's in-memory blob (call .save(path) afterward to persist).
+        Shared by every round-4 skin-weight post-process script
+        (rebuild_face_weights.py, rebuild_arm_body_weights.py,
+        weld_seam_weights.py) so the byte-packing logic lives in exactly
+        one place. `joints0`/`weights0` must already be (N,4) with
+        WEIGHTS_0 rows summing to 1 (glTF requirement) -- callers are
+        responsible for renormalizing before calling this."""
+        prim = self.get_mesh_primitive()
+        g = self.g
+        N = joints0.shape[0]
+        blob = bytearray(self.blob)
+
+        j_acc = g.accessors[prim.attributes.JOINTS_0]
+        j_bv = g.bufferViews[j_acc.bufferView]
+        j_stride = j_bv.byteStride or 4
+        j_offset = j_bv.byteOffset or 0
+        for i in range(N):
+            packed = bytes(int(x) for x in joints0[i])
+            blob[j_offset + i * j_stride: j_offset + i * j_stride + 4] = packed
+
+        w_acc = g.accessors[prim.attributes.WEIGHTS_0]
+        w_bv = g.bufferViews[w_acc.bufferView]
+        w_stride = w_bv.byteStride or 16
+        w_offset = w_bv.byteOffset or 0
+        for i in range(N):
+            packed = weights0[i].astype(np.float32).tobytes()
+            blob[w_offset + i * w_stride: w_offset + i * w_stride + 16] = packed
+        w_acc.min = [float(v) for v in weights0.min(axis=0)]
+        w_acc.max = [float(v) for v in weights0.max(axis=0)]
+
+        self.blob = bytes(blob)
+        g.set_binary_blob(self.blob)
+
     def skinned_positions_at(self, anim, t):
         positions = self.get_positions()  # (N,3) mesh/model space
         joints, ibm = self.get_skin()  # joints: list of node idx; ibm: (J,4,4)

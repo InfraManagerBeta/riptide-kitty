@@ -6,7 +6,7 @@
   "api_base": "https://api.tripo3d.ai/v2/openapi",
   "note_on_api_version": "The v3 REST surface (openapi.tripo3d.ai/v3) rejected this session's vaulted TRIPO_API_KEY at the egress gateway; the stable v2 surface (api.tripo3d.ai/v2/openapi, documented at docs.tripo3d.ai) authenticated successfully and was used for the entire pipeline, both rounds. Same underlying models/tasks, older REST shape.",
   "credential_reference": "TRIPO_API_KEY (environment variable name only; never logged or committed)",
-  "round": 4,
+  "round": 5,
   "pipeline": [
     {
       "stage": "1a. image derivation -- reuse round-1's multiview turnaround (query only, no new credit)",
@@ -207,10 +207,7 @@
     }
   ],
   "reference_images_used": [
-    "reference/kitty-front.png",
-    "reference/kitty-back.png",
-    "reference/kitty-left.png",
-    "reference/kitty-right.png"
+    "reference/kitty-front.png"
   ],
   "derived_images": [
     {
@@ -264,7 +261,8 @@
           "task_id": "e0d9a34e-6b0f-4d50-9833-74d27119256b",
           "reason": "mixamo-spec rig rejected by retarget (error 1004)"
         }
-      ]
+      ],
+      "1b_edit_multiview_image_prompt_applied_to_all_four_views": "Keep this exact same chubby cartoon cat unchanged in every way -- same warm yellow-orange fur color, same cream belly patch, same big round green eyes, same face, same head tufts, same curled tail -- but change only the pose: lift both short arms up and away from the sides of the torso into a relaxed A-pose, so there is a clear, visible gap of open background space between each arm and the flank/belly, with the rounded paws no longer touching the body. Also move the two legs slightly further apart at a relaxed stance. Do not change color, proportions, face, or tail."
     },
     "derived_images_kept_for_audit": [
       "assets/kitty/derived/superseded_round_1/kitty-multiview-base-front.jpg (only view round 1 actually committed at the time)",
@@ -273,7 +271,8 @@
       "assets/kitty/derived/superseded_round_1/kitty-apose-left.jpg",
       "assets/kitty/derived/superseded_round_1/kitty-apose-right.jpg (this is the view whose lower/pressed arm produced the fused-limb reconstruction, per finding #2)"
     ],
-    "credits_consumed_round_1_total": 180
+    "credits_consumed_round_1_total": 180,
+    "note_n4": "N4 (round-4 reviewer finding): this round-1 edit_multiview_image prompt (task ae573a46, applied to all four views) was present in this file at commit 24e24f2 and was silently dropped by a later round's rewrite of this provenance file. Restored verbatim from `git show 24e24f2:assets/kitty/kitty.provenance.json` -- round-4's own fix, this field, no other content in superseded_round_1 changed."
   },
   "clips": {
     "idle": {
@@ -318,17 +317,23 @@
     "keyframe_wave.py": "REWRITTEN this round: authors 'wave' about the model's verified world-X (forward) axis -- frontal-plane sweep -- instead of round 1's world-Z (sagittal) sweep. Same FK-consistent technique otherwise (idle-neutral baseline, forearm follows upperarm).",
     "keyframe_jump.py": "NEW this round: authors 'jump' (Hips translation + Thigh/Calf rotation, both axes verified via FK on the neutral pose, not assumed) as one crouch -> leap -> land, replacing the Tripo preset's repeating small bounces.",
     "fix_walk_inplace.py": "NEW this round: linearly detrends whichever Hips local-translation axis has first != last keyframe values in the retargeted 'walk' preset, removing the baked-in forward stride distance so the cycle loops in place.",
-    "clean_skin_weights.py": "NEW this round: scripted skin-weight cleanup (documented fallback per the manager's ruling) -- zeroes arm-chain weight on any vertex not dominated by that arm chain and renormalizes.",
+    "clean_skin_weights.py": "NEW this round: scripted skin-weight cleanup (documented fallback per the manager's ruling) -- zeroes arm-chain weight on any vertex not dominated by that arm chain and renormalizes. SUPERSEDED round 5 -- see superseded_scripts_round_5. Kept on disk, unused, for audit.",
     "merge_clips.py": "Copies animation channels (matched by joint name) from the separate idle/jump/walk/wave clip GLBs onto one base rigged GLB with a single skeleton+skin; also applies the cosmetic joint rename. Unchanged from round 1.",
-    "gltf_anim.py": "Shared glTF FK + linear-blend-skinning evaluator used by every other script here. Unchanged from round 1.",
+    "gltf_anim.py": "Shared glTF FK + linear-blend-skinning evaluator used by every other script here. Unchanged from round 1. Round 5 ADDITION: GLTFScene.write_skin_weights() -- shared JOINTS_0/WEIGHTS_0 byte-packing, factored out of clean_skin_weights.py's inline version so every round-5 script writes weights back identically.",
     "verify_kitty_v2.py": "NEW this round: self-verification against the V1-V6 contract (see kitty.verify.json) -- independent of scripts/validate-kitty.mjs (out of this round's touch-scope; t2 owns it this round).",
     "verify_kitty.py": "round 1's self-verification script (wave-only numbers); kept for reference, superseded by verify_kitty_v2.py for this round's reporting.",
     "render_preview_textured.py": "NEW this round: a z-buffered, numpy-vectorized software rasterizer that samples the model's own PBR base-color texture via UV coordinates (round 1's render_preview.py was flat-shaded/untextured -- advisory finding #16). Supports arbitrary azimuth (for the '3/4' views), a face-focus crop, and a fixed shared camera window across a sequence of frames (used for the jump crouch/apex/land triple so the rise is visible against a stable frame). Does not mirror the projection at any azimuth.",
     "render_preview.py": "round 1's flat-shaded preview renderer (also used this round for quick numeric/pose sanity renders during development, e.g. the jump clipping check); the committed previews/ images are all from render_preview_textured.py.",
-    "fix_arm_shoulder_weights.py": "NEW this round: re-weights (never re-rigs) each side's Shoulder-vs-limb-chain skin-weight split via a bind-pose plane through the Upperarm joint, mesh-adjacency smoothing, and a targeted edge-strain relaxation pass -- see pipeline stage 4c.",
+    "fix_arm_shoulder_weights.py": "NEW this round: re-weights (never re-rigs) each side's Shoulder-vs-limb-chain skin-weight split via a bind-pose plane through the Upperarm joint, mesh-adjacency smoothing, and a targeted edge-strain relaxation pass -- see pipeline stage 4c. SUPERSEDED round 5 -- see superseded_scripts_round_5. Kept on disk, unused, for audit.",
     "generate_previews_round2.py": "NEW this round: batch driver for every assets/kitty/previews/*.png, using render_preview_textured.py against the re-weighted kitty.glb -- regenerates the existing wave rest/mid1/mid2/peak (front+3/4), face, and jump crouch/apex/land previews, and adds two new views the work order asks for: a close-up of the right shoulder at the wave peak, and a walk-clip frame.",
     "generate_previews_round3.py": "NEW this round: batch driver for every assets/kitty/previews/*.png against the regenerated kitty.glb, reusing render_preview_textured.py unchanged. Reuses round 2's job list/sample times verbatim (re-verified to still land on the same clip phases, since keyframe_wave.py/keyframe_jump.py are unchanged and produce identically-timed clips).",
-    "dominant_joint_render.py": "NEW this round: colours every rendered vertex by its dominant skin joint (fixed left/right colour pairs: shoulder/arm/forearm/hand each a distinct shade), rendered at the bind pose and at the wave clip's own measured peak-hand-height frame -- the work order's arms-dominant-joints-bind.png / arms-dominant-joints-wave-peak.png."
+    "dominant_joint_render.py": "NEW this round: colours every rendered vertex by its dominant skin joint (fixed left/right colour pairs: shoulder/arm/forearm/hand each a distinct shade), rendered at the bind pose and at the wave clip's own measured peak-hand-height frame -- the work order's arms-dominant-joints-bind.png / arms-dominant-joints-wave-peak.png.",
+    "mesh_graph.py": "NEW round 5: shared mesh-adjacency-graph utilities (build_adjacency, multi_source_dijkstra, laplacian_smooth_field, augment_adjacency_with_weld_edges, find_weld_groups, pack_top4) used by rebuild_face_weights.py, rebuild_arm_body_weights.py, and weld_seam_weights.py.",
+    "rebuild_face_weights.py": "NEW round 5: geodesic head-vs-arm-vs-torso reclassification for N2 (cheek tufts owned by the shoulders) -- see skin_weight_rebuild_round_5 for the full method.",
+    "rebuild_arm_body_weights.py": "NEW round 5: geodesic pool-preserving diffusion of the shoulder<->limb<->torso boundary for N1 (shoulder-ring/flank tearing) -- see skin_weight_rebuild_round_5 for the full method.",
+    "weld_seam_weights.py": "NEW round 5: welds (averages) co-located UV-seam-duplicate vertex groups to carry identical JOINTS_0/WEIGHTS_0; run both before (pre-pass) and after (final pass) the two rebuild scripts above.",
+    "rebuild_round4_weights.py": "NEW round 5: orchestrator -- chains weld (pre) -> rebuild_face_weights -> rebuild_arm_body_weights -> weld (final) in the order that matters; see skin_weight_rebuild_round_5.",
+    "own_edge_check.py": "NEW round 5: the work order's own ALL-EDGES verification (every edge, not just the real validator's non-waving-arm-dominated subset) -- vs bind and vs each clip's own frame 0, plus seam-group crack and arm-dominated-above-neck counts."
   },
   "credits_consumed_this_round": {
     "edit_multiview_image_front_only": 5,
@@ -415,10 +420,10 @@
         "prompt": null,
         "note": "Tripo regenerates a consistent 4-view (front/left/back/right) turnaround from a single input image. FIX for finding #9 (provenance missing derived images): all four views of this task are committed this round (assets/kitty/derived/kitty-multiview-base-{front,left,back,right}.jpg) -- round 1 committed only the front view and left the other three neither saved nor hashed.",
         "output_saved_as": [
-          "assets/kitty/derived/kitty-multiview-base-front.jpg",
-          "assets/kitty/derived/kitty-multiview-base-left.jpg",
-          "assets/kitty/derived/kitty-multiview-base-back.jpg",
-          "assets/kitty/derived/kitty-multiview-base-right.jpg"
+          "assets/kitty/derived/superseded_round_2/kitty-multiview-base-front.jpg",
+          "assets/kitty/derived/superseded_round_2/kitty-multiview-base-left.jpg",
+          "assets/kitty/derived/superseded_round_2/kitty-multiview-base-back.jpg",
+          "assets/kitty/derived/superseded_round_2/kitty-multiview-base-right.jpg"
         ],
         "consumed_credit_this_round": 0,
         "consumed_credit_when_first_created_round_1": 10
@@ -609,42 +614,42 @@
     ],
     "derived_images": [
       {
-        "path": "assets/kitty/derived/kitty-multiview-base-front.jpg",
+        "path": "assets/kitty/derived/superseded_round_2/kitty-multiview-base-front.jpg",
         "task_id": "372023f8-617d-4bda-ae3f-6b31ebe66717",
         "sha256": "7fa091cbe2ae447f1246d99bf34c3d9b821c5030a028fdadef801506d6359fc3"
       },
       {
-        "path": "assets/kitty/derived/kitty-multiview-base-left.jpg",
+        "path": "assets/kitty/derived/superseded_round_2/kitty-multiview-base-left.jpg",
         "task_id": "372023f8-617d-4bda-ae3f-6b31ebe66717",
         "sha256": "9000f263410d376695776c7f8a7cfb8d7bb99f2d51f1e79fbd36a4a0915bf730"
       },
       {
-        "path": "assets/kitty/derived/kitty-multiview-base-back.jpg",
+        "path": "assets/kitty/derived/superseded_round_2/kitty-multiview-base-back.jpg",
         "task_id": "372023f8-617d-4bda-ae3f-6b31ebe66717",
         "sha256": "b5cb22945da55698623d3084365f4aeb0233377499e617a3799fbd086b0bf5b1"
       },
       {
-        "path": "assets/kitty/derived/kitty-multiview-base-right.jpg",
+        "path": "assets/kitty/derived/superseded_round_2/kitty-multiview-base-right.jpg",
         "task_id": "372023f8-617d-4bda-ae3f-6b31ebe66717",
         "sha256": "f4916bb154d454cf36c8bd6e7424c343d4930655a513a0b94be5f77f444c9c8d"
       },
       {
-        "path": "assets/kitty/derived/kitty-apose-front.jpg",
+        "path": "assets/kitty/derived/superseded_round_2/kitty-apose-front.jpg",
         "task_id": "56f79c18-81fd-4753-a70b-6b44b391c0ba",
         "sha256": "a6b46090de3c4111ec8d10507a1b5515dde738ba67cf7bc495af27781b7f193d"
       },
       {
-        "path": "assets/kitty/derived/kitty-apose-back.jpg",
+        "path": "assets/kitty/derived/superseded_round_2/kitty-apose-back.jpg",
         "task_id": "56f79c18-81fd-4753-a70b-6b44b391c0ba",
         "sha256": "9341e965496b835b68d79f10ad72b3a0a5a6be66a874699fb92612a05a07f1e7"
       },
       {
-        "path": "assets/kitty/derived/kitty-apose-left.jpg",
+        "path": "assets/kitty/derived/superseded_round_2/kitty-apose-left.jpg",
         "task_id": "56f79c18-81fd-4753-a70b-6b44b391c0ba",
         "sha256": "0feecbf40f415e43c4afc0c63b94b5d454e76b28fbf1e93a7b277b57fda5175a"
       },
       {
-        "path": "assets/kitty/derived/kitty-apose-right.jpg",
+        "path": "assets/kitty/derived/superseded_round_2/kitty-apose-right.jpg",
         "task_id": "56f79c18-81fd-4753-a70b-6b44b391c0ba",
         "sha256": "f7024bb2edd934907aa32a369d71784e9d2fd0784c23f6324c45d9f2bef1d767"
       }
@@ -705,6 +710,59 @@
     "derived_images_kept_for_audit": [
       "assets/kitty/derived/superseded_round_2/kitty-multiview-base-{front,left,back,right}.jpg (round-1-generated turnaround, task 372023f8, reused as edit_multiview_image's original_task_id -- round 2 committed all four views)",
       "assets/kitty/derived/superseded_round_2/kitty-apose-{front,back,left,right}.jpg (round 2's arms-apart edit, task 56f79c18 -- INCONSISTENT raise angle across views: front ~35deg down, left/back/right ~10-15deg down; multiview_to_model fused this cross-view disagreement into the round-2 mesh's second paw-shaped lobe on the right flank, per the manager's finding for this order)"
+    ],
+    "note_a7": "A-7 (round-4 advisory): the 8 output_saved_as paths in this section pointed at assets/kitty/derived/kitty-{multiview-base,apose}-*.jpg without the superseded_round_2/ subdirectory those files were actually moved into when round 3 superseded them -- fixed to match what's really on disk."
+  },
+  "reference_images_used_note": "A-7 (round-4 advisory): only reference/kitty-front.png was ever fed to Tripo as generation input (generate_multiview_image derives back/left/right from it; reference/kitty-back.png, kitty-left.png, kitty-right.png in this repository are the ORIGINAL orthographic turnaround the spec ships with, used only as visual/reviewer reference -- never as Tripo3D input, every round). Previously this list incorrectly implied all four were Tripo inputs.",
+  "round_5_objective_market_round4": "FIX ROUND 4 for ticket t1 (market/manager terminology; this file's internal round 5, layered on round 4's commit b137dc4 = market round 3's asset). The re-probe of b137dc4 confirmed round 3 fixed the fused/doubled arm (separable arms, one paw each, frontal-plane wave, real jump, in-place walk) and the validator PASSED, but smooth-shaded three.js renders found CRUCIAL skin defects the flat rasterizer previews and the then-current validator (V1-V6, no all-edges or seam-duplicate check) could not see: N1 shoulder-ring/flank tearing in every clip (worst in wave: edges between RightArmTwist1/2 and RightShoulder/RightUpLegTwist1/Spine2 opening up to 5.84x vs clip start, 9.9% h gaps) plus 190 co-located UV-seam-duplicate vertex groups carrying DIFFERENT skin weights (cracking apart up to 5.0% h); N2 cheek tufts owned by the shoulders (RightShoulder dominant for 393 vertices above y=0.56, LeftShoulder for 47), dragged into a strip in every non-bind pose. Root cause: clean_skin_weights.py's hard per-vertex zeroing (turns a graded auto-rig blend into a step function at the arm<->body boundary) plus fix_arm_shoulder_weights.py's plane-distance target-fraction split and an 8-iteration edge-strain relaxation pass that repeatedly found the single worst-offending edge against the validator's own sample grid and nudged just its two endpoints -- i.e. weights tuned against the acceptance gate's own number, which this round's ruling forbids ('fix the weights in principle, then verify'). This round does NOT touch geometry, joint hierarchy, bind pose, or the round-3 mesh -- only the skin JOINTS_0/WEIGHTS_0, via three new scripted passes that REPLACE both prior post-processes (kept on disk, superseded, see 'superseded_scripts_round_5' below), plus a re-render of every preview from a real smooth-shaded, textured renderer instead of the flat software rasterizer.",
+  "skin_weight_rebuild_round_5": {
+    "kind": "scripted, documented, geometry/joint/bind-pose-preserving skin-weight rebuild -- REPLACES clean_skin_weights.py and fix_arm_shoulder_weights.py for this and all future rounds (both scripts are KEPT on disk, unused, for audit -- see superseded_scripts_round_5)",
+    "applied_to": "assets/kitty/kitty.glb directly (post-merge, all four clips already baked in) -- same point in the pipeline fix_arm_shoulder_weights.py used to run at",
+    "orchestrator": "scripts/pipeline/rebuild_round4_weights.py -- chains the four stages below in the order that matters (pre-weld -> face fix -> arm/body fix -> final weld); each stage is also independently runnable/documented",
+    "stages": [
+      {
+        "stage": "0. weld_seam_weights.py (PRE-PASS)",
+        "why_first": "This asset's pre-existing UV-seam-duplicate groups (N1) already carried wildly different weights before this round touched anything (one group's four co-located members ranged 0.23-0.76 combined distal weight in the committed round-3 asset) -- welding only AFTER the geodesic diffusion passes below was tried first and measured WORSE: each duplicate diffuses toward its own (different) UV island's local neighborhood, and averaging four already-diverged results back together at the very end reintroduced edge strain the diffusion had just removed (measured: real validator edgeStrain 1.37x before a final-only weld's average, 1.68-1.95x after it). Pre-welding first, plus using weld-augmented mesh adjacency during the diffusion passes (see stage 2/3), means the final weld pass only ever has to correct a small residual drift.",
+        "method": "Groups vertices co-located within 1e-5 (weld-by-position); for any group whose members do NOT already carry identical JOINTS_0/WEIGHTS_0, averages each member's per-joint weight contribution (weighted equally, true mean) and assigns the result to every member."
+      },
+      {
+        "stage": "1. rebuild_face_weights.py (N2 fix)",
+        "method": "Multi-source Dijkstra geodesic distance (mesh-adjacency + weld edges, so the whole mesh is one connected component instead of ~10 UV-island fragments) from THREE seed categories -- confidently Head/Neck/Neck1-dominant vertices, confidently DISTAL-arm-chain-dominant vertices (per side), and confidently torso/hip/leg/tail-dominant vertices. A vertex above the Neck joint's own bind height, AND laterally offset from the front/back midline by more than 5% of model height (LATERAL_MIN_FRAC=0.09h in the final tuning -- see module docstring for the measured regression this gate exists to prevent: a midline collar/chest vertex getting wrongly flattened to 100% Head), gets ALL of its weight zeroed except Head/Neck/Neck1 (redistributed in its own existing proportions) if and only if it is geodesically closer to the head seeds than to EITHER the arm seeds OR the torso seeds.",
+        "result_this_round": "RightShoulder dominant above y=0.56: 393 -> 32 vertices (92% reduction); LeftShoulder: 47 -> 0."
+      },
+      {
+        "stage": "2. rebuild_arm_body_weights.py (N1 fix)",
+        "method": "Per side, a fixed 'pool' (this vertex's OWN existing total Shoulder+distal-chain weight) is measured once and NEVER diffused -- only the INTERNAL SPLIT of that fixed pool (what fraction sits on Shoulder vs. on each distal joint) is smoothed, via heat/geodesic-style Laplacian diffusion (uniform per-edge weight, weld-augmented adjacency) of each slot's fraction-of-pool field, restricted to a geodesic band around the shoulder/armpit/flank isoline. An earlier design that diffused each joint's RAW weight independently was tried and measured WORSE (a 100%-Shoulder, 0%-distal vertex ended up >50% distal after mass drained in from richer neighbors while shoulder mass drained out -- taking a vertex that was perfectly STATIC during `wave` and making it move, a strictly worse defect).",
+        "result_this_round": "edgeStrain (real validator, wave clip): 1.46x (round-4 asset, already-tight per its own provenance) effectively re-measured at ~2.4-10x across all-body triangles once the reviewer's smooth-shaded render surfaced N1 -> 1.43x after this rebuild. bodyCoDeformation: 4/12212 (0.03%) vertices >3%h, worst 5.65%h (well under both the 0.5%-count and 8%h-hard caps)."
+      },
+      {
+        "stage": "3. weld_seam_weights.py (FINAL PASS)",
+        "method": "Identical script to stage 0, re-run after the diffusion passes to correct the (now small) residual drift and guarantee zero UV-seam-duplicate groups differ in the committed asset. Includes an unconditional final V4 safety-net scan (independent of what produced the input) that clamps any head/neck-dominant vertex found carrying >0.2 arm-chain weight back under a 0.15 margin.",
+        "result_this_round": "4207 weld groups total; seam-group crack (own all-edges check): max 0.000%h in every clip (idle/jump/walk/wave), down from 3.3-5.0%h."
+      }
+    ],
+    "shared_utility": "scripts/pipeline/mesh_graph.py (NEW this round) -- build_adjacency, multi_source_dijkstra, laplacian_smooth_field, augment_adjacency_with_weld_edges, find_weld_groups, pack_top4. Used by all three rebuild scripts above so the mesh-graph and weight-packing logic lives in exactly one place.",
+    "own_verification": "scripts/pipeline/own_edge_check.py (NEW this round) -- the work order's own ALL-EDGES check (every triangle edge, not just the real validator's non-waving-arm-dominated subset), vs BIND and vs each clip's own frame 0, plus seam-group crack and arm-dominated-above-neck counts. See kitty.verify.json is the V1-V6 self-check; this script's own report is summarized in the round's completion notes (market side), not duplicated into this provenance file."
+  },
+  "superseded_scripts_round_5": {
+    "note": "clean_skin_weights.py and fix_arm_shoulder_weights.py are KEPT ON DISK, UNUSED, for audit trail -- the round-5 pipeline no longer calls either. Both remain fully documented in their own module docstrings and in this file's earlier round entries (skin_weight_cleanup, round_4_addendum) describing exactly what they did and why they were superseded.",
+    "clean_skin_weights.py": "Superseded by rebuild_face_weights.py + rebuild_arm_body_weights.py's pool-preserving diffusion, which replace its hard per-vertex zeroing with a geodesically-bounded, graded reduction.",
+    "fix_arm_shoulder_weights.py": "Superseded by rebuild_arm_body_weights.py, which replaces its bind-pose-plane target-fraction split and worst-edge relaxation loop with geodesic pool-preserving diffusion (see skin_weight_rebuild_round_5.stages above for the measured reasons each design choice was made)."
+  },
+  "credits_consumed_round_5": {
+    "note": "ZERO Tripo3D API calls this round -- no image/mesh/rig/animation regeneration. Every change is a scripted, offline skin-weight (JOINTS_0/WEIGHTS_0) rebuild plus new preview renders from the existing committed geometry/animations.",
+    "total": 0
+  },
+  "previews_round_5": {
+    "renderer": "NEW this round: headless Chromium (Puppeteer, --use-gl=angle --use-angle=swiftshader software WebGL) + three.js 0.160.1 (GLTFLoader + AnimationMixer), loading the committed kitty.glb directly and rendering PBR-textured, smooth-shaded (vertex-normal Lambert/PBR, not the flat software rasterizer used every prior round). Replaces render_preview_textured.py for the committed previews/ set this round (that script is kept, unchanged, for the dominant-joint diagnostic renders below, which are a flat-color diagnostic overlay, not a shading-quality check).",
+    "views": [
+      "idle-full-front.png -- full body, front, idle t=0",
+      "jump-crouch.png / jump-apex.png / jump-land.png -- full body, 3/4, jump t=0.15/0.55/0.85",
+      "walk-midstride.png -- full body, 3/4, walk t=1.18",
+      "wave-rest/mid1/mid2/armup-{front,34}.png -- full wave sweep, both front and 3/4, t=0.00/0.71/1.10/2.30",
+      "wave-shoulder-closeup-peak-{front,34}.png -- NEW (split from one file into front+3/4 per the work order): right shoulder/armpit close-up at the wave peak (t=2.30), both angles",
+      "face-idle-t0.png / face-wave-peak.png / face-walk-midstride.png -- NEW third (walk-midstride) added per the work order: face close-ups at idle t=0, wave peak, and walk mid-stride",
+      "arms-dominant-joints-bind.png / arms-dominant-joints-wave-peak.png -- unchanged dominant-joint-colour diagnostic (scripts/pipeline/dominant_joint_render.py, flat-shaded by design), re-rendered against the rebuilt asset to confirm one continuous colour run per arm with a real gap at the wave peak and no stray colour patches on the flank"
     ]
   }
 }
