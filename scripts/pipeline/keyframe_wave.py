@@ -7,34 +7,50 @@ run, dive, climb, jump, slash, shoot, hurt, fall, turn, quadruped/hexapod/
 octopod/serpentine/aquatic marches -- no wave). Per the work order, the wave
 clip is therefore hand-keyframed on the generated rig's own arm joints
 (mesh + skeleton are still 100% Tripo-generated; only the animation curves
-are authored here).
+are authored here, per the poster's ruling that authored animation curves
+on a generated rig are in scope).
 
-Important: the rig's raw BIND pose is the arms-apart "cheer" pose used to
-generate/rig the mesh (arms already raised) -- that is *not* the relaxed
-standing pose the other three clips use. `animate_retarget` repose every
-joint's rotation to a neutral standing pose for its presets. So this script
-takes the `idle` clip's frame-0 rotation as the neutral baseline for every
-joint (translations are left at the rig's bind values, which match to
-within noise -- this keeps hips/root exactly at bind, i.e. not moving at
-all), and only the waving arm's chain is animated on top of that baseline.
-That keeps the "other arm at rest" and "torso/hips stable" requirements
-true by construction, and keeps the pose continuous with idle/jump/walk.
+FIX ROUND 1 note (finding #3, CRUCIAL): the previous version of this
+script rotated the shoulder/forearm about the model's world **Z** axis.
+That sweeps the arm through the model's X-Y plane -- the SAGITTAL plane,
+forward/back -- which is why round 1's wave raised the arm forward instead
+of out to the side, with the paw peaking only at ~shoulder height. This
+round's facing axis was re-verified for the *regenerated* mesh (not
+assumed carried over from round 1): rendering the raw model from four
+axis-aligned candidate cameras (+-X, +-Z) shows the face square-on only
+from the +X side (scripts/pipeline/render_preview.py's own "front" view
+uses this same depth axis) -- so the model's forward axis is world +X,
+and its **frontal plane** (the plane a person waves "at" someone in,
+containing the up axis and the left-right axis) is the **Y-Z** plane.
+Rotating the arm about world **X** sweeps it through Y-Z: out to the side
+and up, then side-to-side once raised. That is the fix: every rotation
+below is expressed about the X axis instead of Z.
 
 Approach for the waving arm: forward-kinematics-consistent keyframing.
   * Compute each joint's NEUTRAL WORLD rotation by composing the idle
-    clip's frame-0 local rotations from the scene root down to the joint.
+    clip's frame-0 local rotations from the scene root down to the joint
+    (the rig's raw BIND pose is this round's shallow arms-apart A-pose,
+    not the relaxed standing pose the other three clips use -- so, as in
+    round 1, idle's own frame-0 is the neutral baseline every joint is
+    pinned to for the whole clip except the waving arm's own chain).
   * Shoulder (Upperarm): neutral -> raised, single smoothstep ramp up,
-    hold, smoothstep back down at the end -- rotation about the model's
-    world Z axis (Y-up model; a world-Z rotation sweeps the arm sideways-
-    and-up in the frontal plane, matching the arms-apart reference pose).
+    hold, smoothstep back down at the end -- rotation about world X.
+    The raise angle and per-side sign were verified numerically (FK on
+    the neutral pose) so the paw ends up ABOVE shoulder height and
+    further from the torso on that side, not the reverse.
   * Forearm: rigidly follows the raising upper arm (preserving the
-    neutral elbow bend) plus an additional, enveloped oscillation in world
-    space once the arm is up -- this is the actual "wave".
-  * Every other joint gets a constant rotation channel pinned to the idle
-    neutral pose (so nothing silently reverts to the cheer bind pose).
+    neutral elbow bend) plus an additional, enveloped oscillation in
+    world space (also about world X) once the arm is up -- this is the
+    actual wave, and it now swings the paw side-to-side/up-down in the
+    frontal plane instead of forward.
+  * Every other joint (including the OTHER arm, torso, head, tail) gets a
+    constant rotation channel pinned to the idle-neutral pose for the
+    entire clip, so root/hips translation is 0 throughout and nothing
+    silently reverts to the bind pose.
   * Local rotation is recovered as local = inverse(parent_world) *
     desired_world, using the *animated* parent orientation for the
-    forearm (whose parent, the upper arm, is itself moving).
+    forearm (whose parent, the upper arm, is itself moving) -- same
+    technique as round 1, just about a different axis.
 
 Usage:
     python3 keyframe_wave.py <rigged_base.glb> <neutral_clip.glb> \
@@ -79,8 +95,8 @@ def main():
     ap.add_argument("--side", choices=["L", "R"], default="R",
                      help="which arm waves (default: R / right arm)")
     ap.add_argument("--duration", type=float, default=3.2)
-    ap.add_argument("--raise-deg", type=float, default=100.0)
-    ap.add_argument("--wave-amp-deg", type=float, default=24.0)
+    ap.add_argument("--raise-deg", type=float, default=120.0)
+    ap.add_argument("--wave-amp-deg", type=float, default=30.0)
     ap.add_argument("--wave-period", type=float, default=0.8)
     args = ap.parse_args()
 
@@ -125,10 +141,18 @@ def main():
     forearm_world_neutral = neutral_world_rotation(forearm)
     forearm_local_bind_offset = upperarm_world_neutral.inv() * forearm_world_neutral
 
-    z_axis = np.array([0.0, 0.0, 1.0])
-    # Right arm waves with +Z sweep; left arm mirrors with -Z so the raise
-    # still goes outward/up instead of into the body.
-    sign = 1.0 if side == "R" else -1.0
+    # Frontal-plane hinge axis = world X, this model's verified forward/
+    # facing axis (see module docstring). A rotation about X sweeps a
+    # point through the Y-Z plane: out to the side and up, not forward.
+    x_axis = np.array([1.0, 0.0, 0.0])
+    # Sign verified numerically against the neutral (idle frame-0) bind
+    # pose: with the arm hanging at the model's side, rotating the LEFT
+    # arm (world Z < 0) by a POSITIVE angle about +X, or the RIGHT arm
+    # (world Z > 0) by a NEGATIVE angle, both sweep the hand outward (away
+    # from the torso's Z=0 centerline) AND upward past shoulder height --
+    # confirmed by sampling forward-kinematics hand position at several
+    # candidate raise angles for both signs before picking this mapping.
+    sign = 1.0 if side == "L" else -1.0
 
     n_frames = int(round(args.duration * FPS)) + 1
     times = np.linspace(0.0, args.duration, n_frames)
@@ -149,13 +173,14 @@ def main():
         wave_angle = np.radians(args.wave_amp_deg) * wave_env * \
             np.sin(2 * np.pi * (t - t_raise_end) / args.wave_period)
 
-        extra_shoulder = R.from_rotvec(sign * shoulder_angle * z_axis)
+        extra_shoulder = R.from_rotvec(sign * shoulder_angle * x_axis)
         desired_upperarm_world = extra_shoulder * upperarm_world_neutral
 
-        # forearm rigidly follows the upper arm (preserving the neutral elbow
-        # bend) plus an additional wave wobble expressed in world space
+        # forearm rigidly follows the raising upper arm (preserving the
+        # neutral elbow bend) plus an additional, enveloped oscillation
+        # in world space once the arm is up -- this is the actual "wave".
         natural_forearm_world = desired_upperarm_world * forearm_local_bind_offset
-        extra_elbow = R.from_rotvec(sign * wave_angle * z_axis)
+        extra_elbow = R.from_rotvec(sign * wave_angle * x_axis)
         desired_forearm_world = extra_elbow * natural_forearm_world
 
         local_upperarm = clavicle_world_neutral.inv() * desired_upperarm_world
@@ -187,8 +212,6 @@ def main():
         return acc_idx
 
     time_acc = append_accessor(times32, 5126, "SCALAR", extra_min_max=True)
-    upperarm_acc = append_accessor(upperarm_quats, 5126, "VEC4")
-    forearm_acc = append_accessor(forearm_quats, 5126, "VEC4")
 
     # constant 2-key neutral-pose channel for every other joint (so the wave
     # clip never silently falls back to the raw arms-apart bind pose)
